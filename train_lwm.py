@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
 import torch.optim as optim
-from utils import (generate_channels_and_labels, tokenizer_train, 
+from utils import (cleanup_memory, generate_channels_and_labels, print_memory_usage, tokenizer_train,
                    create_train_dataloader, count_parameters, train_lwm)
 import numpy as np
 import pretrained_model  # Assuming this contains the LWM model definition
@@ -15,7 +15,10 @@ from torch.optim import AdamW
 import warnings
 import os
 import pickle
+import gc
+import psutil
 warnings.filterwarnings("ignore", category=UserWarning)
+
 
 # =============================================================================
 # 2. SCENARIO LIST DEFINITION
@@ -668,7 +671,10 @@ preprocessed_data = []
 cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
 os.makedirs(cache_dir, exist_ok=True)
 
-cities_scenarios = scenarios[:-3]
+# Track memory at start
+print_memory_usage("START - Before Data Generation")
+
+cities_scenarios = [] #scenarios[:-3]
 for scenario in cities_scenarios:
     for bs_idx in range (1,4):
         # Create a unique cache filename for this scenario + bs_idx combination
@@ -704,54 +710,56 @@ for scenario in cities_scenarios:
         labels.extend(scenario_labels)
         channels.append(scenario_channels)
 
+# Track memory after data generation
+print_memory_usage("AFTER Data Generation (before tokenization)")
 
-# bs_idxs = [[1], [4, 15], [2]]
-# for scenario_idx, scenario in enumerate(scenarios[-3:]):
-#     for bs_idx in bs_idxs[scenario_idx]:
-#         for zone in range(20):
-#             row_start = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][0]
-#             row_end = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][1]
-#             grid_idx = scenario_properties[scenario+f"_v{zone+1}"]["grid_idx"]-1
+bs_idxs =[[2]] # [[1], [4, 15], [2]]
+for scenario_idx, scenario in enumerate(scenarios[-1:]):
+    for bs_idx in bs_idxs[scenario_idx]:
+        for zone in range(20):
+            row_start = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][0]
+            row_end = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][1]
+            grid_idx = scenario_properties[scenario+f"_v{zone+1}"]["grid_idx"]-1
 
-#             # Create a unique cache filename for this scenario + bs_idx + zone combination
-#             cache_filename = f"{scenario}_bs{bs_idx}_zone{zone+1}.pkl"
-#             cache_filepath = os.path.join(cache_dir, cache_filename)
+            # Create a unique cache filename for this scenario + bs_idx + zone combination
+            cache_filename = f"{scenario}_bs{bs_idx}_zone{zone+1}.pkl"
+            cache_filepath = os.path.join(cache_dir, cache_filename)
 
-#             # Check if cached data exists
-#             if os.path.exists(cache_filepath):
-#                 print(f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}, Zone {zone+1}")
-#                 with open(cache_filepath, 'rb') as f:
-#                     cached_data = pickle.load(f)
-#                     scenario_channels = cached_data['channels']
-#                     scenario_labels = cached_data['labels']
-#             else:
-#                 # Generate data if cache doesn't exist
-#                 scenario_channels, scenario_labels = generate_channels_and_labels(
-#                     n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
-#                     n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
-#                     grid_idx=grid_idx,
-#                     bs_idx=bs_idx,
-#                     scenario_name=scenario,
-#                     rows=np.arange(row_start, row_end),
-#                     task=task,
-#                     n_beams=64
-#                 )
+            # Check if cached data exists
+            if os.path.exists(cache_filepath):
+                print(f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}, Zone {zone+1}")
+                with open(cache_filepath, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    scenario_channels = cached_data['channels']
+                    scenario_labels = cached_data['labels']
+            else:
+                # Generate data if cache doesn't exist
+                scenario_channels, scenario_labels = generate_channels_and_labels(
+                    n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
+                    n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
+                    grid_idx=grid_idx,
+                    bs_idx=bs_idx,
+                    scenario_name=scenario,
+                    rows=np.arange(row_start, row_end),
+                    task=task,
+                    n_beams=64
+                )
 
-#                 # Only save to cache if we got valid data
-#                 if scenario_channels.numel() > 0:
-#                     print(f"Saving data to cache: {cache_filepath}")
-#                     with open(cache_filepath, 'wb') as f:
-#                         pickle.dump({
-#                             'channels': scenario_channels,
-#                             'labels': scenario_labels
-#                         }, f)
+                # Only save to cache if we got valid data
+                if scenario_channels.numel() > 0:
+                    print(f"Saving data to cache: {cache_filepath}")
+                    with open(cache_filepath, 'wb') as f:
+                        pickle.dump({
+                            'channels': scenario_channels,
+                            'labels': scenario_labels
+                        }, f)
 
-#             if scenario_channels.numel() == 0:
-#                 print(f"No candidate user in zone {zone+1} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
-#                 continue
+            if scenario_channels.numel() == 0:
+                print(f"No candidate user in zone {zone+1} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
+                continue
 
-#             labels.extend(scenario_labels)
-#             channels.append(scenario_channels)
+            labels.extend(scenario_labels)
+            channels.append(scenario_channels)
 # =============================================================================
 # 6. DATA TOKENIZATION
 #    - Tokenize channel matrices into input sequences with masking for pretraining
@@ -764,6 +772,8 @@ preprocessed_data = tokenizer_train(
     mask=True,
     seed=42,
 )
+
+print_memory_usage("AFTER Tokenization (channels deleted)")
 
 # =============================================================================
 # 7. TRAIN/VALIDATION/TEST SPLIT
@@ -785,10 +795,15 @@ for key, samples in preprocessed_data.items():
     train_size = int(train_ratio * total_samples)
     val_size = int(val_ratio * total_samples)
     test_size = total_samples - train_size - val_size
-    
+
     train_data[key], val_data[key], test_data[key] = random_split(
         samples, [train_size, val_size, test_size]
     )
+
+# Delete preprocessed_data after splitting to free memory
+del preprocessed_data
+cleanup_memory()
+print_memory_usage("AFTER Train/Val Split (preprocessed_data deleted)")
 
 # =============================================================================
 # 8. DATALOADER CREATION
@@ -797,6 +812,11 @@ for key, samples in preprocessed_data.items():
 
 train_loaders = create_train_dataloader(train_data, batch_size=BATCH_SIZE, shuffle=True)
 val_loaders = create_train_dataloader(val_data, batch_size=VAL_BATCH_SIZE, shuffle=False)
+
+# Delete split data after dataloader creation to free memory
+del train_data, val_data, test_data
+cleanup_memory()
+print_memory_usage("AFTER DataLoader Creation (split data deleted)")
 
 # =============================================================================
 # 9. MODEL INITIALIZATION

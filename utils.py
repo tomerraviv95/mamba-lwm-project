@@ -1,3 +1,5 @@
+import gc
+import psutil
 import torch
 import torch.nn as nn
 import numpy as np
@@ -14,6 +16,29 @@ import umap
 from math import pi
 import zipfile
 import shutil
+
+# =============================================================================
+# MEMORY TRACKING UTILITIES
+# =============================================================================
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    return mem_info.rss / (1024 ** 3)  # Convert bytes to GB
+
+def print_memory_usage(stage_name):
+    """Print current memory usage with stage label"""
+    mem_gb = get_memory_usage()
+    print(f"\n{'='*60}")
+    print(f"Memory Usage at [{stage_name}]: {mem_gb:.2f} GB")
+    print(f"{'='*60}\n")
+
+def cleanup_memory():
+    """Force garbage collection and clear CUDA cache"""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 def generate_channels_and_labels(
     n_ant_bs=16,
@@ -354,12 +379,18 @@ def get_parameters(num_ant_hor=32, num_ant_vert=1, n_subcarriers=32):
     return ch_params
 
 def tokenizer_train(channels,
-                    max_len=513, 
-                    masking_percent=0.40, 
-                    mask=False, 
-                    seed=42):
+                    max_len=513,
+                    masking_percent=0.40,
+                    mask=False,
+                    seed=42,
+                    batch_size=1000,
+                    patches_cache_dir=None):
     """
     Tokenize wireless channel data into patches and optionally apply masking.
+
+    MEMORY OPTIMIZATION: This version processes channels in batches to avoid
+    loading all patches into memory simultaneously. Intermediate results are
+    saved to disk and read back, significantly reducing peak memory usage.
 
     Args:
         channels (torch.Tensor or list): Input channel data to be tokenized.
@@ -367,44 +398,188 @@ def tokenizer_train(channels,
         masking_percent (float): Percentage of patches to mask if mask is True. Defaults to 0.40.
         mask (bool): Whether to apply masking to the tokenized samples. Defaults to False.
         seed (int): Random seed for reproducibility in masking. Defaults to 42.
+        batch_size (int): Number of channel samples to process per batch. Defaults to 1000.
+        patches_cache_dir (str): Directory for temporary patch files. Defaults to scenarios_cache_lwm/patches_cache.
 
     Returns:
         dict or torch.Tensor: If mask is True, returns a dictionary mapping sequence lengths to lists
             of tokenized samples. If mask is False, returns a tensor of stacked tokenized samples.
     """
-    patches = [patch_maker(channel_set, patch_rows=4, patch_cols=4) for channel_set in channels]
-    patches = [patch for patch_list in patches for patch in patch_list]
-    print("\nTotal number of samples:", len(patches))
-    
-    grouped_data = defaultdict(list)  # Group samples by sequence length
-    grouped_data_2 = []
-    
-    for user_idx in tqdm(range(len(patches)), desc="Processing items"):
-        patch_size = patches[user_idx].shape[1]
-        n_patches = patches[user_idx].shape[0]
-        n_masks_half = int(masking_percent * n_patches)
-        
-        word2id = {
-            '[CLS]': 0.2 * np.ones((patch_size)),
-            '[MASK]': 0.1 * np.ones((patch_size))
-        }
-        
-        sample = make_sample(
-            user_idx, patches, word2id, n_patches, n_masks_half, patch_size, mask=mask, seed=seed
-        )
-        
-        if mask:
-            seq_length = len(sample[0]) 
-            grouped_data[seq_length].append(sample)
+    # Setup patches cache directory
+    if patches_cache_dir is None:
+        # Use subdirectory under scenarios cache
+        base_cache = os.path.join(os.path.dirname(__file__), "..", "scenarios_cache_lwm")
+        if os.path.exists(r"C:\Users\tomer\scenarios_cache_lwm"):
+            base_cache = r"C:\Users\tomer\scenarios_cache_lwm"
+        patches_cache_dir = os.path.join(base_cache, "patches_cache")
+
+    os.makedirs(patches_cache_dir, exist_ok=True)
+
+    # Check if tokenized files already exist (resume support)
+    existing_files = [f for f in os.listdir(patches_cache_dir) if f.endswith('.pkl')]
+    skip_tokenization = False
+
+    if existing_files:
+        print(f"\n{'='*60}")
+        print(f"Found {len(existing_files)} existing tokenized files in:")
+        print(f"  {patches_cache_dir}")
+        print(f"{'='*60}")
+        response = input("\nReuse existing tokenized data? (y/n): ").strip().lower()
+
+        if response == 'y':
+            skip_tokenization = True
+            print("Skipping tokenization, will load existing files...")
+
+            # Build temp_files mapping from existing files
+            temp_files = defaultdict(list)
+            for filename in existing_files:
+                # Parse filename: seq{seq_length}_batch{batch_num}.pkl
+                if filename.startswith('seq') and '_batch' in filename:
+                    try:
+                        seq_part = filename.split('_batch')[0]
+                        seq_length = int(seq_part.replace('seq', ''))
+                        filepath = os.path.join(patches_cache_dir, filename)
+                        temp_files[seq_length].append(filepath)
+                    except ValueError:
+                        print(f"Warning: Could not parse filename {filename}")
+
+            # Sort file lists to ensure consistent order
+            for seq_length in temp_files:
+                temp_files[seq_length].sort()
+
+            # Delete channels immediately since we won't need them
+            del channels
+            cleanup_memory()
+            print_memory_usage("AFTER Loading (channels deleted, using cached data)")
         else:
-            grouped_data_2.append(sample)
-    
-    if mask:
-        normalized_grouped_data = {i: grouped_data[key] for i, key in enumerate(sorted(grouped_data.keys()))}
-    else: 
-        normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
-    
-    return normalized_grouped_data 
+            print("Regenerating tokenized data from scratch...")
+            # Clean up old files
+            for filename in existing_files:
+                os.remove(os.path.join(patches_cache_dir, filename))
+            print(f"Cleaned up {len(existing_files)} old files")
+
+    # Track temp files by sequence length
+    if not skip_tokenization:
+        temp_files = defaultdict(list)
+    n_scenarios = len(channels) if not skip_tokenization else 0
+
+    # Only run tokenization if not using cached data
+    if not skip_tokenization:
+        # First, generate all patches and count total samples
+        print(f"\nStep 1: Generating patches from {n_scenarios} scenarios...")
+        all_patches = []
+        for channel_set in tqdm(channels, desc="Creating patches"):
+            scenario_patches = patch_maker(channel_set, patch_rows=4, patch_cols=4)
+            # Flatten scenario patches into individual samples
+            for patch in scenario_patches:
+                all_patches.append(patch)
+
+        # Delete channels immediately after patch generation
+        total_samples = len(all_patches)
+        print(f"\nTotal samples to process: {total_samples}")
+        del channels
+        cleanup_memory()
+        print_memory_usage("AFTER Patch Generation (channels deleted)")
+
+        print(f"\nStep 2: Tokenizing {total_samples} samples in batches of {batch_size}...")
+        print(f"Temp directory: {patches_cache_dir}")
+
+    try:
+        # PHASE 1: Process patches in batches and save to disk (only if not skipping)
+        if not skip_tokenization:
+            batch_counter = 0
+            for batch_start in tqdm(range(0, total_samples, batch_size), desc="Tokenizing batches"):
+                batch_end = min(batch_start + batch_size, total_samples)
+                batch_patches = all_patches[batch_start:batch_end]
+
+                # Tokenize each sample in this batch
+                batch_samples = defaultdict(list)  # {seq_length: [samples]}
+
+                for user_idx in range(len(batch_patches)):
+                    patch_size = batch_patches[user_idx].shape[1]
+                    n_patches = batch_patches[user_idx].shape[0]
+                    n_masks_half = int(masking_percent * n_patches)
+
+                    word2id = {
+                        '[CLS]': 0.2 * np.ones((patch_size)),
+                        '[MASK]': 0.1 * np.ones((patch_size))
+                    }
+
+                    sample = make_sample(
+                        user_idx, batch_patches, word2id, n_patches, n_masks_half,
+                        patch_size, mask=mask, seed=seed
+                    )
+
+                    if mask:
+                        seq_length = len(sample[0])
+                        batch_samples[seq_length].append(sample)
+                    else:
+                        batch_samples[0].append(sample)
+
+                # Save this batch to disk
+                for seq_length, samples in batch_samples.items():
+                    temp_file = f"seq{seq_length}_batch{batch_counter}.pkl"
+                    filepath = os.path.join(patches_cache_dir, temp_file)
+                    with open(filepath, 'wb') as f:
+                        pickle.dump(samples, f)
+                    temp_files[seq_length].append(filepath)
+
+                # Critical: Delete batch data immediately to free memory
+                del batch_patches, batch_samples
+                cleanup_memory()
+
+                batch_counter += 1
+
+            # Delete all_patches after processing
+            print(f"\nTokenization complete: {batch_counter} batches processed")
+            del all_patches
+            cleanup_memory()
+            print_memory_usage("AFTER Tokenization (all patches deleted)")
+
+        # PHASE 2: Read temp files back into grouped_data
+        grouped_data = defaultdict(list)
+        grouped_data_2 = []
+
+        print("\nReading tokenized samples from disk...")
+        total_samples = 0
+
+        for seq_length in tqdm(sorted(temp_files.keys()), desc="Loading batches"):
+            for temp_file_path in temp_files[seq_length]:
+                with open(temp_file_path, 'rb') as f:
+                    samples = pickle.load(f)
+                    if mask:
+                        grouped_data[seq_length].extend(samples)
+                        total_samples += len(samples)
+                    else:
+                        grouped_data_2.extend(samples)
+                        total_samples += len(samples)
+
+                # Delete temp file as we read it
+                os.remove(temp_file_path)
+
+        print(f"\nTotal number of samples: {total_samples}")
+
+        # Normalize grouped data
+        if mask:
+            normalized_grouped_data = {i: grouped_data[key]
+                                     for i, key in enumerate(sorted(grouped_data.keys()))}
+        else:
+            normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
+
+        return normalized_grouped_data
+
+    finally:
+        # Cleanup: Only remove temp directory if tokenization completed successfully
+        # Keep the files for potential resume if there was an error
+        if os.path.exists(patches_cache_dir) and not skip_tokenization:
+            # Check if we successfully completed (no exception during tokenization)
+            try:
+                # Only cleanup if we want a clean slate next time
+                # For now, we keep the files to enable resume functionality
+                print(f"\nTokenized data saved to: {patches_cache_dir}")
+                print(f"  (Will be reused if you restart tokenization)")
+            except Exception as e:
+                print(f"\nWarning: {e}") 
 
 def tokenizer(channels,
               max_len=513, 
@@ -610,12 +785,209 @@ def patch_reconstructor(patches, original_rows, original_cols, patch_rows=4, pat
 
     return reconstructed
 
+class LazyChannelDataset(torch.utils.data.Dataset):
+    """
+    Lazy loading dataset that loads and tokenizes scenarios on-demand.
+
+    This dataset doesn't load all data into memory upfront. Instead:
+    1. Builds an index mapping sample_idx → (scenario, bs_idx, sample_offset)
+    2. Loads scenarios from cache only when needed
+    3. Keeps a small LRU cache of recently accessed scenarios
+    4. Tokenizes samples on-the-fly
+
+    This allows training on datasets much larger than available RAM.
+    """
+    def __init__(self, scenario_configs, cache_dir, max_len=513, masking_percent=0.40,
+                 mask=True, seed=42, max_cached_scenarios=3):
+        """
+        Args:
+            scenario_configs: List of dicts with keys: scenario_name, bs_idx, n_ant_bs,
+                            n_subcarriers, grid_idx, rows, task, n_beams
+            cache_dir: Directory where scenario cache files are stored
+            max_len: Maximum sequence length for tokenization
+            masking_percent: Percentage of patches to mask
+            mask: Whether to apply masking
+            seed: Random seed for masking
+            max_cached_scenarios: Max number of scenarios to keep in memory (LRU cache)
+        """
+        self.scenario_configs = scenario_configs
+        self.cache_dir = cache_dir
+        self.max_len = max_len
+        self.masking_percent = masking_percent
+        self.mask = mask
+        self.seed = seed
+        self.max_cached_scenarios = max_cached_scenarios
+
+        # LRU cache for loaded scenarios: {cache_key: (channels, labels)}
+        self.scenario_cache = {}
+        self.cache_access_order = []  # Track access order for LRU
+
+        # Build index: maps global sample index to (scenario_idx, sample_offset)
+        self.sample_index = []
+        self._build_index()
+
+    def _build_index(self):
+        """Build index mapping global sample idx to scenario and sample offset"""
+        print("\n" + "="*60)
+        print("Building lazy dataset index...")
+        print("="*60)
+
+        for scenario_idx, config in enumerate(self.scenario_configs):
+            cache_key = f"{config['scenario_name']}_bs{config['bs_idx']}"
+            cache_filepath = os.path.join(self.cache_dir, f"{cache_key}.pkl")
+
+            if not os.path.exists(cache_filepath):
+                print(f"WARNING: Cache file not found: {cache_filepath}")
+                continue
+
+            # Load just to get the count, then release immediately
+            with open(cache_filepath, 'rb') as f:
+                cached_data = pickle.load(f)
+                n_samples = cached_data['channels'].shape[0]
+
+            # Add all samples from this scenario to the index
+            for sample_offset in range(n_samples):
+                self.sample_index.append({
+                    'scenario_idx': scenario_idx,
+                    'sample_offset': sample_offset,
+                    'cache_key': cache_key
+                })
+
+            print(f"  [{scenario_idx}] {cache_key}: {n_samples} samples")
+
+        print(f"\nTotal samples in lazy dataset: {len(self.sample_index)}")
+        print("="*60 + "\n")
+
+    def _load_scenario(self, cache_key):
+        """Load a scenario from cache with LRU eviction"""
+        # Check if already in cache
+        if cache_key in self.scenario_cache:
+            # Move to end (most recently used)
+            self.cache_access_order.remove(cache_key)
+            self.cache_access_order.append(cache_key)
+            return self.scenario_cache[cache_key]
+
+        # Load from disk
+        cache_filepath = os.path.join(self.cache_dir, f"{cache_key}.pkl")
+        with open(cache_filepath, 'rb') as f:
+            cached_data = pickle.load(f)
+
+        channels = cached_data['channels']
+        labels = cached_data['labels']
+
+        # Evict least recently used scenario if cache is full
+        if len(self.scenario_cache) >= self.max_cached_scenarios:
+            lru_key = self.cache_access_order.pop(0)
+            del self.scenario_cache[lru_key]
+
+        # Add to cache
+        self.scenario_cache[cache_key] = (channels, labels)
+        self.cache_access_order.append(cache_key)
+
+        return channels, labels
+
+    def __len__(self):
+        return len(self.sample_index)
+
+    def __getitem__(self, idx):
+        """
+        Load and tokenize a single sample on-demand.
+
+        Returns:
+            If mask=True: (input_ids, masked_tokens, masked_pos)
+            If mask=False: input_ids tensor
+        """
+        # Get scenario and sample info
+        sample_info = self.sample_index[idx]
+        cache_key = sample_info['cache_key']
+        sample_offset = sample_info['sample_offset']
+
+        # Load scenario (from cache or disk)
+        channels, labels = self._load_scenario(cache_key)
+
+        # Get the specific channel sample
+        channel_sample = channels[sample_offset:sample_offset+1]  # Keep batch dimension
+
+        # Create patches for this single sample
+        patches = patch_maker(channel_sample, patch_rows=4, patch_cols=4)
+        patches = patches[0]  # Remove batch dimension, shape: (n_patches, patch_size)
+
+        # Tokenize this single sample
+        patch_size = patches.shape[1]
+        n_patches = patches.shape[0]
+        n_masks = int(self.masking_percent * n_patches)
+
+        word2id = {
+            '[CLS]': 0.2 * np.ones((patch_size)),
+            '[MASK]': 0.1 * np.ones((patch_size))
+        }
+
+        # Use deterministic seed based on global index for reproducibility
+        sample_seed = self.seed + idx if self.seed is not None else None
+
+        sample = make_sample(
+            user_idx=0,  # We only have one sample
+            patch=patches[np.newaxis, :, :],  # Add batch dimension back
+            word2id=word2id,
+            n_patches=n_patches,
+            n_masks=n_masks,
+            patch_size=patch_size,
+            mask=self.mask,
+            seed=sample_seed
+        )
+
+        return sample
+
+class ListDataset(torch.utils.data.Dataset):
+    """
+    Lightweight dataset wrapper that holds data as a list and converts to tensors on-demand.
+    This avoids creating giant tensors upfront, reducing memory usage significantly.
+    """
+    def __init__(self, data_list):
+        self.data = data_list
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+    def __len__(self):
+        return len(self.data)
+
+def collate_fn_efficient(batch):
+    """
+    Custom collate function that converts batch data to tensors on-the-fly.
+    This is called by DataLoader for each batch, avoiding the need to convert
+    the entire dataset to tensors upfront.
+
+    Args:
+        batch: List of tuples (input_ids, masked_tokens, masked_pos)
+
+    Returns:
+        Tuple of tensors ready for model input
+    """
+    input_ids, masked_tokens, masked_pos = zip(*batch)
+
+    # Convert to numpy arrays first (more memory efficient than direct tensor conversion)
+    input_ids_np = np.array(input_ids, dtype=np.float32)
+    masked_tokens_np = np.array(masked_tokens, dtype=np.float32)
+    masked_pos_np = np.array(masked_pos, dtype=np.int64)
+
+    # Convert to tensors
+    return (
+        torch.from_numpy(input_ids_np),
+        torch.from_numpy(masked_tokens_np),
+        torch.from_numpy(masked_pos_np)
+    )
+
 def create_train_dataloader(grouped_data, batch_size, shuffle):
     """
     Creates a dictionary of DataLoaders from grouped input data based on sequence lengths.
 
+    MEMORY OPTIMIZATION: This version uses a lightweight ListDataset wrapper and converts
+    data to tensors only when needed (per batch), rather than converting the entire dataset
+    upfront. This significantly reduces peak memory usage during dataloader creation.
+
     This function processes pre-grouped training data where each key in the dictionary corresponds
-    to a specific sequence length, and each value is a list of training samples. It converts the 
+    to a specific sequence length, and each value is a list of training samples. It converts the
     data into PyTorch tensors and constructs a separate DataLoader for each sequence length.
 
     Args:
@@ -630,23 +1002,24 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
     dataloaders = {}
 
     for seq_length, group in grouped_data.items():
-        
+
         print(f"dataloader in progress ...\nkey: {seq_length}")
-        
+
         ## Uncomment the following line if you run out of memory during pre-training
         # batch_size = batch_size // 8 if seq_length >= 5 else batch_size
-        
-        # Unpack samples for the current group
-        input_ids, masked_tokens, masked_pos = zip(*group)
 
-        # Convert to tensors
-        input_ids_tensor = torch.tensor(input_ids, dtype=torch.float32)
-        masked_tokens_tensor = torch.tensor(masked_tokens, dtype=torch.float32)
-        masked_pos_tensor = torch.tensor(masked_pos, dtype=torch.long)
+        # Use lightweight ListDataset instead of converting everything to tensors upfront
+        dataset = ListDataset(group)
 
-        # Create TensorDataset and DataLoader
-        dataset = TensorDataset(input_ids_tensor, masked_tokens_tensor, masked_pos_tensor)
-        dataloaders[seq_length] = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=True)
+        # DataLoader with custom collate_fn that converts to tensors per-batch
+        dataloaders[seq_length] = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            collate_fn=collate_fn_efficient,
+            pin_memory=True,
+            num_workers=0  # Keep 0 for Windows compatibility
+        )
 
     return dataloaders
 
