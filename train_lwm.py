@@ -2,6 +2,9 @@
 # 1. IMPORTS AND WARNINGS SETUP
 #    - Load necessary PyTorch modules, utilities, and suppress UserWarnings
 # =============================================================================
+from collections import defaultdict
+import os
+import pickle
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
@@ -13,8 +16,6 @@ import pretrained_model  # Assuming this contains the LWM model definition
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 import warnings
-import os
-import pickle
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # =============================================================================
@@ -662,16 +663,15 @@ scenarios = scenarios_list()
 channels = []
 labels = []
 scenario_properties = scenario_prop()
-preprocessed_data = []
+preprocessed_data_dict = defaultdict(list)
 
 # Create cache directory for scenario data
 cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
 os.makedirs(cache_dir, exist_ok=True)
-
-cities_scenarios = scenarios[:-3]
-for scenario in cities_scenarios:
+ 
+for scenario in scenarios[:-3]: 
     for bs_idx in range (1,4):
-        # Create a unique cache filename for this scenario + bs_idx combination
+         # Create a unique cache filename for this scenario + bs_idx combination
         cache_filename = f"{scenario}_bs{bs_idx}.pkl"
         cache_filepath = os.path.join(cache_dir, cache_filename)
 
@@ -700,70 +700,57 @@ for scenario in cities_scenarios:
                     'channels': scenario_channels,
                     'labels': scenario_labels
                 }, f)
+        # Tokenize channels for this scenario immediately
+        print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}")
+        scenario_preprocessed_dict = tokenizer_train(
+            [scenario_channels],
+            max_len=MAX_LEN,
+            masking_percent=MASK_PERCENT,
+            mask=True,
+            seed=42
+        )
+        for key, value in scenario_preprocessed_dict.items():
+            preprocessed_data_dict[key].extend(value)
 
         labels.extend(scenario_labels)
-        channels.append(scenario_channels)
-
 
 # bs_idxs = [[1], [4, 15], [2]]
-# for scenario_idx, scenario in enumerate(scenarios[-3:]):
+# for scenario_idx, scenario in enumerate(scenarios[-3:]):  
 #     for bs_idx in bs_idxs[scenario_idx]:
-#         for zone in range(20):
+#         for zone in range (20):
 #             row_start = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][0]
 #             row_end = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][1]
 #             grid_idx = scenario_properties[scenario+f"_v{zone+1}"]["grid_idx"]-1
-
-#             # Create a unique cache filename for this scenario + bs_idx + zone combination
-#             cache_filename = f"{scenario}_bs{bs_idx}_zone{zone+1}.pkl"
-#             cache_filepath = os.path.join(cache_dir, cache_filename)
-
-#             # Check if cached data exists
-#             if os.path.exists(cache_filepath):
-#                 print(f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}, Zone {zone+1}")
-#                 with open(cache_filepath, 'rb') as f:
-#                     cached_data = pickle.load(f)
-#                     scenario_channels = cached_data['channels']
-#                     scenario_labels = cached_data['labels']
-#             else:
-#                 # Generate data if cache doesn't exist
-#                 scenario_channels, scenario_labels = generate_channels_and_labels(
-#                     n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
-#                     n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
-#                     grid_idx=grid_idx,
-#                     bs_idx=bs_idx,
-#                     scenario_name=scenario,
-#                     rows=np.arange(row_start, row_end),
-#                     task=task,
-#                     n_beams=64
-#                 )
-
-#                 # Only save to cache if we got valid data
-#                 if scenario_channels.numel() > 0:
-#                     print(f"Saving data to cache: {cache_filepath}")
-#                     with open(cache_filepath, 'wb') as f:
-#                         pickle.dump({
-#                             'channels': scenario_channels,
-#                             'labels': scenario_labels
-#                         }, f)
-
+#             scenario_channels, scenario_labels = generate_channels_and_labels(
+#                 n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
+#                 n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
+#                 grid_idx=grid_idx,
+#                 bs_idx=bs_idx,
+#                 scenario_name=scenario,
+#                 rows=np.arange(row_start, row_end),
+#                 task=task,
+#                 n_beams=64
+#             )
+            
 #             if scenario_channels.numel() == 0:
-#                 print(f"No candidate user in zone {zone+1} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
+#                 print(f"No candidate user in zone {zone} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
 #                 continue
-
+            
 #             labels.extend(scenario_labels)
 #             channels.append(scenario_channels)
+
 # =============================================================================
 # 6. DATA TOKENIZATION
 #    - Tokenize channel matrices into input sequences with masking for pretraining
 # =============================================================================
 
-preprocessed_data = tokenizer_train(
-    channels,
-    max_len=MAX_LEN,
-    masking_percent=MASK_PERCENT,
-    mask=True,
-    seed=42,
-)
+# preprocessed_data = tokenizer_train(
+#     channels,
+#     max_len=MAX_LEN,
+#     masking_percent=MASK_PERCENT,
+#     mask=True,
+#     seed=42
+# )
 
 # =============================================================================
 # 7. TRAIN/VALIDATION/TEST SPLIT
@@ -779,7 +766,7 @@ train_data = {}
 val_data = {}
 test_data = {}
 
-for key, samples in preprocessed_data.items():
+for key, samples in preprocessed_data_dict.items():
     print(f"key: {key}")
     total_samples = len(samples)
     train_size = int(train_ratio * total_samples)

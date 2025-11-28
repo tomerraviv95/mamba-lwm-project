@@ -288,22 +288,22 @@ def DeepMIMO_data_gen(scenario, num_ant_hor, num_ant_vert, n_subcarriers, bs_idx
             manual_unzip_scenario(scenario)
 
     data = dm.load(scenario, tx_sets=[bs_idx], rx_sets=[grid_idx])
-
+    
     if row_indices is not None:
         if grid_idx == 0:
-            row_idxs = data.get_idxs(mode='row', row_idxs=row_indices) # example: row_indices = np.arange(40,60)
-            data = data.trim(idxs=row_idxs)
+            row_idxs = data.get_row_idxs(row_indices) # example: row_indices = np.arange(40,60)
+            data = data.subset(row_idxs)
         elif grid_idx == 1:
             if scenario == "o1_3p5":
-                col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-2751)
-                data = data.trim(idxs=col_idxs)
+                col_idxs = data.get_col_idxs(row_indices-2751)
+                data = data.subset(col_idxs)
             elif scenario == "boston5G_3p5":
-                row_idxs = data.get_idxs(mode='row', row_idxs=row_indices-812)
-                data = data.trim(idxs=row_idxs)
+                row_idxs = data.get_row_idxs(row_indices-812)
+                data = data.subset(row_idxs)
         elif grid_idx == 2:
             if scenario == "o1_3p5":
-                col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-3852)
-            data = data.trim(idxs=col_idxs)
+                col_idxs = data.get_col_idxs(row_indices-3852)
+            data = data.subset(col_idxs)
     
     # data.plot_coverage(data.los)
     data.compute_channels(parameters)
@@ -400,7 +400,7 @@ def tokenizer_train(channels,
             grouped_data_2.append(sample)
     
     if mask:
-        normalized_grouped_data = {i: grouped_data[key] for i, key in enumerate(sorted(grouped_data.keys()))}
+        normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
     else: 
         normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
     
@@ -452,7 +452,7 @@ def tokenizer(channels,
             grouped_data_2.append(sample)
     
     if mask:
-        normalized_grouped_data = {i: grouped_data[key] for i, key in enumerate(sorted(grouped_data.keys()))}
+        normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
     else: 
         normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
     
@@ -1117,4 +1117,3 @@ def plot_radar_chart(task_names, optimized_scores, baseline_scores, title="Task 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight', transparent=False)
     plt.show()
-
