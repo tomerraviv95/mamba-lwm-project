@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
 import torch.optim as optim
-from utils import (generate_channels_and_labels, tokenizer_train, 
+from utils import (generate_channels_and_labels, tokenizer_train,
                    create_train_dataloader, count_parameters, train_lwm)
 import numpy as np
 import pretrained_model  # Assuming this contains the LWM model definition
@@ -668,8 +668,12 @@ preprocessed_data_dict = defaultdict(list)
 # Create cache directory for scenario data
 cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
 os.makedirs(cache_dir, exist_ok=True)
- 
-for scenario in scenarios[:-3]: 
+
+# Create directory for tokenized data organized by sequence length
+tokenized_base_dir = r"C:\Users\tomer\tokenized_data_lwm"
+os.makedirs(tokenized_base_dir, exist_ok=True)
+
+for scenario in scenarios[:-3]:
     for bs_idx in range (1,4):
          # Create a unique cache filename for this scenario + bs_idx combination
         cache_filename = f"{scenario}_bs{bs_idx}.pkl"
@@ -700,7 +704,10 @@ for scenario in scenarios[:-3]:
                     'channels': scenario_channels,
                     'labels': scenario_labels
                 }, f)
-        # Tokenize channels for this scenario immediately
+
+        # Check if tokenized data already exists for all sequence length keys
+        # We'll need to tokenize first to know the keys, or we can check a common location
+        # For simplicity, we tokenize and check each key's file existence
         print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}")
         scenario_preprocessed_dict = tokenizer_train(
             [scenario_channels],
@@ -709,10 +716,60 @@ for scenario in scenarios[:-3]:
             mask=True,
             seed=42
         )
+
+        # Save tokenized data to pickle files organized by sequence length
         for key, value in scenario_preprocessed_dict.items():
-            preprocessed_data_dict[key].extend(value)
+            # Create subdirectory for this sequence length (key)
+            seq_len_dir = os.path.join(tokenized_base_dir, str(key))
+            os.makedirs(seq_len_dir, exist_ok=True)
+
+            # Create pickle filename based on scenario and bs_idx
+            pkl_filename = f"{scenario}_bs{bs_idx}.pkl"
+            pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
+
+            # Check if file already exists
+            if os.path.exists(pkl_filepath):
+                print(f"Tokenized data already exists, skipping: {pkl_filepath}")
+            else:
+                # Save to pickle
+                print(f"Saving tokenized data to: {pkl_filepath}")
+                with open(pkl_filepath, 'wb') as f:
+                    pickle.dump(value, f)
 
         labels.extend(scenario_labels)
+
+# Load all tokenized data from pickle files back into preprocessed_data_dict
+print("\n" + "="*80)
+print("Loading tokenized data from pickle files...")
+print("="*80)
+
+preprocessed_data_dict = defaultdict(list)
+
+# Iterate through sequence length subdirectories
+for seq_len_key in os.listdir(tokenized_base_dir):
+    seq_len_dir = os.path.join(tokenized_base_dir, seq_len_key)
+
+    if os.path.isdir(seq_len_dir):
+        print(f"\nLoading data for sequence length: {seq_len_key}")
+
+        # Iterate through all pickle files in this subdirectory
+        for pkl_file in os.listdir(seq_len_dir):
+            if pkl_file.endswith('.pkl'):
+                pkl_filepath = os.path.join(seq_len_dir, pkl_file)
+                print(f"  Loading: {pkl_file}")
+
+                # Read pickle file
+                with open(pkl_filepath, 'rb') as f:
+                    data_list = pickle.load(f)
+
+                # Extend the preprocessed_data_dict with this data
+                preprocessed_data_dict[seq_len_key].extend(data_list)
+
+        print(f"  Total samples loaded for sequence length {seq_len_key}: {len(preprocessed_data_dict[seq_len_key])}")
+
+print("\n" + "="*80)
+print(f"Total sequence length keys loaded: {len(preprocessed_data_dict)}")
+print("="*80)
 
 # bs_idxs = [[1], [4, 15], [2]]
 # for scenario_idx, scenario in enumerate(scenarios[-3:]):  
@@ -776,6 +833,7 @@ for key, samples in preprocessed_data_dict.items():
     train_data[key], val_data[key], test_data[key] = random_split(
         samples, [train_size, val_size, test_size]
     )
+del preprocessed_data_dict
 
 # =============================================================================
 # 8. DATALOADER CREATION
