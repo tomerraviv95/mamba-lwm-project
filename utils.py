@@ -610,43 +610,78 @@ def patch_reconstructor(patches, original_rows, original_cols, patch_rows=4, pat
 
     return reconstructed
 
-def create_train_dataloader(grouped_data, batch_size, shuffle):
+class LazyLoadDataset(torch.utils.data.Dataset):
     """
-    Creates a dictionary of DataLoaders from grouped input data based on sequence lengths.
-
-    This function processes pre-grouped training data where each key in the dictionary corresponds
-    to a specific sequence length, and each value is a list of training samples. It converts the 
-    data into PyTorch tensors and constructs a separate DataLoader for each sequence length.
+    Lazy-loading dataset that reads samples from pickle files on-demand.
 
     Args:
-        grouped_data (dict): A dictionary where keys are sequence lengths (e.g., 1, 2, ..., T), and
-                             values are lists of tuples (input_ids, masked_tokens, masked_pos).
-        batch_size (int): Batch size to use for the DataLoaders.
-        shuffle (bool): Whether to shuffle the data during loading.
+        pickle_file_paths (list): List of paths to pickle files
+        indices (list): List of (file_idx, sample_idx) tuples indicating which samples to use
+    """
+    def __init__(self, pickle_file_paths, indices):
+        self.pickle_file_paths = pickle_file_paths
+        self.indices = indices  # [(file_idx, sample_idx), ...]
+        self._cache = {}  # Cache loaded pickle files in memory
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        file_idx, sample_idx = self.indices[idx]
+
+        # Load pickle file if not cached
+        if file_idx not in self._cache:
+            with open(self.pickle_file_paths[file_idx], 'rb') as f:
+                self._cache[file_idx] = pickle.load(f)
+
+        # Get the sample: [input_ids, masked_tokens, masked_pos]
+        sample = self._cache[file_idx][sample_idx]
+
+        # Convert to tensors
+        input_ids = torch.tensor(sample[0], dtype=torch.float32)
+        masked_tokens = torch.tensor(sample[1], dtype=torch.float32)
+        masked_pos = torch.tensor(sample[2], dtype=torch.long)
+
+        return input_ids, masked_tokens, masked_pos
+
+def create_train_dataloader(grouped_data, batch_size, shuffle):
+    """
+    Creates a dictionary of DataLoaders using lazy-loading datasets.
+
+    Args:
+        grouped_data (dict): Dictionary mapping seq_len to (file_metadata, indices)
+            where file_metadata = [(filepath, num_samples), ...]
+            and indices = [(file_idx, sample_idx), ...]
+        batch_size (int): Batch size for DataLoaders
+        shuffle (bool): Whether to shuffle data
 
     Returns:
-        dict: A dictionary mapping each sequence length to its corresponding DataLoader.
+        dict: Dictionary mapping seq_len to DataLoader
     """
     dataloaders = {}
 
-    for seq_length, group in grouped_data.items():
-        
-        print(f"dataloader in progress ...\nkey: {seq_length}")
-        
-        ## Uncomment the following line if you run out of memory during pre-training
-        # batch_size = batch_size // 8 if seq_length >= 5 else batch_size
-        
-        # Unpack samples for the current group
-        input_ids, masked_tokens, masked_pos = zip(*group)
+    for seq_length, (file_metadata, indices) in grouped_data.items():
+        print(f"\nCreating dataloader for sequence length: {seq_length}")
+        print(f"  Number of samples: {len(indices)}")
 
-        # Convert to tensors
-        input_ids_tensor = torch.tensor(input_ids, dtype=torch.float32)
-        masked_tokens_tensor = torch.tensor(masked_tokens, dtype=torch.float32)
-        masked_pos_tensor = torch.tensor(masked_pos, dtype=torch.long)
+        # Extract file paths from metadata
+        file_paths = [filepath for filepath, _ in file_metadata]
 
-        # Create TensorDataset and DataLoader
-        dataset = TensorDataset(input_ids_tensor, masked_tokens_tensor, masked_pos_tensor)
-        dataloaders[seq_length] = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=True)
+        # Create lazy-loading dataset
+        dataset = LazyLoadDataset(file_paths, indices)
+
+        # Create DataLoader with multiple workers for parallel I/O
+        # Note: On Windows, num_workers > 0 requires if __name__ == '__main__' guard
+        # Setting to 0 for Windows compatibility (single-process loading)
+        dataloaders[seq_length] = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            pin_memory=True,
+            num_workers=0  # Set to 0 for Windows; use 2-4 on Linux/Mac
+        )
+
+        print(f"  DataLoader created with batch_size={batch_size}, num_workers=0")
 
     return dataloaders
 

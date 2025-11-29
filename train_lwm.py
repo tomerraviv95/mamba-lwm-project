@@ -2,12 +2,18 @@
 # 1. IMPORTS AND WARNINGS SETUP
 #    - Load necessary PyTorch modules, utilities, and suppress UserWarnings
 # =============================================================================
+
+# Fix matplotlib backend to avoid tkinter errors on Windows
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 from collections import defaultdict
 import os
 import pickle
+import random
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split, TensorDataset
+from torch.utils.data import DataLoader
 import torch.optim as optim
 from utils import (generate_channels_and_labels, tokenizer_train,
                    create_train_dataloader, count_parameters, train_lwm)
@@ -657,259 +663,284 @@ task = ["LosNlosClassification",
 #    - Iterate over scenarios and base station indices to generate channel samples and labels
 #    - Handle both full-scenario and zoned sub-scenarios for campus and Boston data
 # =============================================================================
+if __name__ == "__main__":
+    scenarios = scenarios_list()
 
-scenarios = scenarios_list()
+    channels = []
+    labels = []
+    scenario_properties = scenario_prop()
+    preprocessed_data_dict = defaultdict(list)
 
-channels = []
-labels = []
-scenario_properties = scenario_prop()
-preprocessed_data_dict = defaultdict(list)
+    # Create cache directory for scenario data
+    cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
+    os.makedirs(cache_dir, exist_ok=True)
 
-# Create cache directory for scenario data
-cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
-os.makedirs(cache_dir, exist_ok=True)
+    # Create directory for tokenized data organized by sequence length
+    tokenized_base_dir = r"C:\Users\tomer\tokenized_data_lwm"
+    os.makedirs(tokenized_base_dir, exist_ok=True)
 
-# Create directory for tokenized data organized by sequence length
-tokenized_base_dir = r"C:\Users\tomer\tokenized_data_lwm"
-os.makedirs(tokenized_base_dir, exist_ok=True)
+    for scenario in scenarios[:2]:
+        for bs_idx in range (1,4):
+            # Create a unique cache filename for this scenario + bs_idx combination
+            cache_filename = f"{scenario}_bs{bs_idx}.pkl"
+            cache_filepath = os.path.join(cache_dir, cache_filename)
 
-for scenario in scenarios[:-3]:
-    for bs_idx in range (1,4):
-         # Create a unique cache filename for this scenario + bs_idx combination
-        cache_filename = f"{scenario}_bs{bs_idx}.pkl"
-        cache_filepath = os.path.join(cache_dir, cache_filename)
+            # Check if cached data exists
+            if os.path.exists(cache_filepath):
+                print(f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}")
+                with open(cache_filepath, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    scenario_channels = cached_data['channels']
+                    scenario_labels = cached_data['labels']
+            else:
+                # Generate data if cache doesn't exist
+                scenario_channels, scenario_labels = generate_channels_and_labels(
+                    n_ant_bs=scenario_properties[scenario]["n_ant_bs"],
+                    n_subcarriers=scenario_properties[scenario]["n_subcarriers"],
+                    bs_idx=bs_idx,
+                    scenario_name=scenario,
+                    task=task,
+                    n_beams=64
+                )
 
-        # Check if cached data exists
-        if os.path.exists(cache_filepath):
-            print(f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}")
-            with open(cache_filepath, 'rb') as f:
-                cached_data = pickle.load(f)
-                scenario_channels = cached_data['channels']
-                scenario_labels = cached_data['labels']
-        else:
-            # Generate data if cache doesn't exist
-            scenario_channels, scenario_labels = generate_channels_and_labels(
-                n_ant_bs=scenario_properties[scenario]["n_ant_bs"],
-                n_subcarriers=scenario_properties[scenario]["n_subcarriers"],
-                bs_idx=bs_idx,
-                scenario_name=scenario,
-                task=task,
-                n_beams=64
+                # Save to cache
+                print(f"Saving data to cache: {cache_filepath}")
+                with open(cache_filepath, 'wb') as f:
+                    pickle.dump({
+                        'channels': scenario_channels,
+                        'labels': scenario_labels
+                    }, f)
+
+            # Check if tokenized data already exists for all sequence length keys
+            # We'll need to tokenize first to know the keys, or we can check a common location
+            # For simplicity, we tokenize and check each key's file existence
+            print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}")
+            scenario_preprocessed_dict = tokenizer_train(
+                [scenario_channels],
+                max_len=MAX_LEN,
+                masking_percent=MASK_PERCENT,
+                mask=True,
+                seed=42
             )
 
-            # Save to cache
-            print(f"Saving data to cache: {cache_filepath}")
-            with open(cache_filepath, 'wb') as f:
-                pickle.dump({
-                    'channels': scenario_channels,
-                    'labels': scenario_labels
-                }, f)
+            # Save tokenized data to pickle files organized by sequence length
+            for key, value in scenario_preprocessed_dict.items():
+                # Create subdirectory for this sequence length (key)
+                seq_len_dir = os.path.join(tokenized_base_dir, str(key))
+                os.makedirs(seq_len_dir, exist_ok=True)
 
-        # Check if tokenized data already exists for all sequence length keys
-        # We'll need to tokenize first to know the keys, or we can check a common location
-        # For simplicity, we tokenize and check each key's file existence
-        print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}")
-        scenario_preprocessed_dict = tokenizer_train(
-            [scenario_channels],
-            max_len=MAX_LEN,
-            masking_percent=MASK_PERCENT,
-            mask=True,
-            seed=42
-        )
+                # Create pickle filename based on scenario and bs_idx
+                pkl_filename = f"{scenario}_bs{bs_idx}.pkl"
+                pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
 
-        # Save tokenized data to pickle files organized by sequence length
-        for key, value in scenario_preprocessed_dict.items():
-            # Create subdirectory for this sequence length (key)
-            seq_len_dir = os.path.join(tokenized_base_dir, str(key))
-            os.makedirs(seq_len_dir, exist_ok=True)
+                # Check if file already exists
+                if os.path.exists(pkl_filepath):
+                    print(f"Tokenized data already exists, skipping: {pkl_filepath}")
+                else:
+                    # Save to pickle
+                    print(f"Saving tokenized data to: {pkl_filepath}")
+                    with open(pkl_filepath, 'wb') as f:
+                        pickle.dump(value, f)
 
-            # Create pickle filename based on scenario and bs_idx
-            pkl_filename = f"{scenario}_bs{bs_idx}.pkl"
-            pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
+            labels.extend(scenario_labels)
 
-            # Check if file already exists
-            if os.path.exists(pkl_filepath):
-                print(f"Tokenized data already exists, skipping: {pkl_filepath}")
-            else:
-                # Save to pickle
-                print(f"Saving tokenized data to: {pkl_filepath}")
-                with open(pkl_filepath, 'wb') as f:
-                    pickle.dump(value, f)
+    # Collect tokenized data file metadata (lazy loading - don't load all data into memory)
+    print("\n" + "="*80)
+    print("Collecting tokenized data file metadata...")
+    print("="*80)
 
-        labels.extend(scenario_labels)
+    file_metadata = defaultdict(list)  # {seq_len: [(filepath, num_samples), ...]}
 
-# Load all tokenized data from pickle files back into preprocessed_data_dict
-print("\n" + "="*80)
-print("Loading tokenized data from pickle files...")
-print("="*80)
+    # Iterate through sequence length subdirectories
+    for seq_len_key in os.listdir(tokenized_base_dir)[:2]:
+        seq_len_dir = os.path.join(tokenized_base_dir, seq_len_key)
 
-preprocessed_data_dict = defaultdict(list)
+        if os.path.isdir(seq_len_dir):
+            print(f"\nProcessing sequence length: {seq_len_key}")
 
-# Iterate through sequence length subdirectories
-for seq_len_key in os.listdir(tokenized_base_dir):
-    seq_len_dir = os.path.join(tokenized_base_dir, seq_len_key)
+            # Iterate through all pickle files in this subdirectory
+            for pkl_file in os.listdir(seq_len_dir):
+                if pkl_file.endswith('.pkl'):
+                    pkl_filepath = os.path.join(seq_len_dir, pkl_file)
 
-    if os.path.isdir(seq_len_dir):
-        print(f"\nLoading data for sequence length: {seq_len_key}")
+                    # Load just to get sample count, then discard
+                    with open(pkl_filepath, 'rb') as f:
+                        data_list = pickle.load(f)
+                        num_samples = len(data_list)
 
-        # Iterate through all pickle files in this subdirectory
-        for pkl_file in os.listdir(seq_len_dir):
-            if pkl_file.endswith('.pkl'):
-                pkl_filepath = os.path.join(seq_len_dir, pkl_file)
-                print(f"  Loading: {pkl_file}")
+                    file_metadata[seq_len_key].append((pkl_filepath, num_samples))
+                    print(f"  Found: {pkl_file} with {num_samples} samples")
 
-                # Read pickle file
-                with open(pkl_filepath, 'rb') as f:
-                    data_list = pickle.load(f)
+                    del data_list  # Free memory immediately
 
-                # Extend the preprocessed_data_dict with this data
-                preprocessed_data_dict[seq_len_key].extend(data_list)
+            total_samples = sum(count for _, count in file_metadata[seq_len_key])
+            print(f"  Total samples for sequence length {seq_len_key}: {total_samples}")
 
-        print(f"  Total samples loaded for sequence length {seq_len_key}: {len(preprocessed_data_dict[seq_len_key])}")
+    print("\n" + "="*80)
+    print(f"Total sequence length keys: {len(file_metadata)}")
+    print("="*80)
 
-print("\n" + "="*80)
-print(f"Total sequence length keys loaded: {len(preprocessed_data_dict)}")
-print("="*80)
+    # bs_idxs = [[1], [4, 15], [2]]
+    # for scenario_idx, scenario in enumerate(scenarios[-3:]):  
+    #     for bs_idx in bs_idxs[scenario_idx]:
+    #         for zone in range (20):
+    #             row_start = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][0]
+    #             row_end = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][1]
+    #             grid_idx = scenario_properties[scenario+f"_v{zone+1}"]["grid_idx"]-1
+    #             scenario_channels, scenario_labels = generate_channels_and_labels(
+    #                 n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
+    #                 n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
+    #                 grid_idx=grid_idx,
+    #                 bs_idx=bs_idx,
+    #                 scenario_name=scenario,
+    #                 rows=np.arange(row_start, row_end),
+    #                 task=task,
+    #                 n_beams=64
+    #             )
+                
+    #             if scenario_channels.numel() == 0:
+    #                 print(f"No candidate user in zone {zone} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
+    #                 continue
+                
+    #             labels.extend(scenario_labels)
+    #             channels.append(scenario_channels)
 
-# bs_idxs = [[1], [4, 15], [2]]
-# for scenario_idx, scenario in enumerate(scenarios[-3:]):  
-#     for bs_idx in bs_idxs[scenario_idx]:
-#         for zone in range (20):
-#             row_start = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][0]
-#             row_end = scenario_properties[scenario+f"_v{zone+1}"]["n_rows"][1]
-#             grid_idx = scenario_properties[scenario+f"_v{zone+1}"]["grid_idx"]-1
-#             scenario_channels, scenario_labels = generate_channels_and_labels(
-#                 n_ant_bs=scenario_properties[scenario+f"_v{zone+1}"]["n_ant_bs"],
-#                 n_subcarriers=scenario_properties[scenario+f"_v{zone+1}"]["n_subcarriers"],
-#                 grid_idx=grid_idx,
-#                 bs_idx=bs_idx,
-#                 scenario_name=scenario,
-#                 rows=np.arange(row_start, row_end),
-#                 task=task,
-#                 n_beams=64
-#             )
-            
-#             if scenario_channels.numel() == 0:
-#                 print(f"No candidate user in zone {zone} for scenario {scenario} has a path to bs_idx {bs_idx} (All channels are zero)")
-#                 continue
-            
-#             labels.extend(scenario_labels)
-#             channels.append(scenario_channels)
+    # =============================================================================
+    # 6. DATA TOKENIZATION
+    #    - Tokenize channel matrices into input sequences with masking for pretraining
+    # =============================================================================
 
-# =============================================================================
-# 6. DATA TOKENIZATION
-#    - Tokenize channel matrices into input sequences with masking for pretraining
-# =============================================================================
+    # preprocessed_data = tokenizer_train(
+    #     channels,
+    #     max_len=MAX_LEN,
+    #     masking_percent=MASK_PERCENT,
+    #     mask=True,
+    #     seed=42
+    # )
 
-# preprocessed_data = tokenizer_train(
-#     channels,
-#     max_len=MAX_LEN,
-#     masking_percent=MASK_PERCENT,
-#     mask=True,
-#     seed=42
-# )
+    # =============================================================================
+    # 7. TRAIN/VALIDATION/TEST SPLIT
+    #    - Split indices for each sequence length into train, validation, and test subsets
+    # =============================================================================
 
-# =============================================================================
-# 7. TRAIN/VALIDATION/TEST SPLIT
-#    - Split each tokenized dataset into train, validation, and test subsets with a fixed random seed
-# =============================================================================
+    SEED = 42
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
 
-SEED = 42
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-train_ratio = 0.8
-val_ratio = 0.2
-train_data = {}
-val_data = {}
-test_data = {}
+    train_ratio = 0.8
+    val_ratio = 0.2
 
-for key, samples in preprocessed_data_dict.items():
-    print(f"key: {key}")
-    total_samples = len(samples)
-    train_size = int(train_ratio * total_samples)
-    val_size = int(val_ratio * total_samples)
-    test_size = total_samples - train_size - val_size
-    
-    train_data[key], val_data[key], test_data[key] = random_split(
-        samples, [train_size, val_size, test_size]
+    train_data = {}  # Will store: {seq_len: (file_metadata, train_indices)}
+    val_data = {}
+    test_data = {}
+
+    for key in file_metadata.keys():
+        print(f"\nSplitting data for sequence length: {key}")
+
+        # Build global indices: list of (file_idx, sample_idx_within_file)
+        indices = []
+        for file_idx, (filepath, num_samples) in enumerate(file_metadata[key]):
+            for sample_idx in range(num_samples):
+                indices.append((file_idx, sample_idx))
+
+        total_samples = len(indices)
+        print(f"  Total samples: {total_samples}")
+
+        # Shuffle with fixed seed for reproducibility
+        random.shuffle(indices)
+
+        # Split
+        train_size = int(train_ratio * total_samples)
+        val_size = int(val_ratio * total_samples)
+        test_size = total_samples - train_size - val_size
+
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:train_size+val_size]
+        test_indices = indices[train_size+val_size:]
+
+        print(f"  Train: {len(train_indices)}, Val: {len(val_indices)}, Test: {len(test_indices)}")
+
+        # Store file metadata and corresponding indices
+        train_data[key] = (file_metadata[key], train_indices)
+        val_data[key] = (file_metadata[key], val_indices)
+        test_data[key] = (file_metadata[key], test_indices)
+
+    # =============================================================================
+    # 8. DATALOADER CREATION
+    #    - Build PyTorch DataLoader objects for batched training and validation
+    # =============================================================================
+
+    train_loaders = create_train_dataloader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+    val_loaders = create_train_dataloader(val_data, batch_size=VAL_BATCH_SIZE, shuffle=False)
+
+    # =============================================================================
+    # 9. MODEL INITIALIZATION
+    #    - Instantiate the LWM transformer model and optionally load pre-trained weights
+    #    - Wrap with DataParallel for multi-GPU support
+    # =============================================================================
+
+    gpu_ids = [0,1] # device_idx
+    device = torch.device(f"cuda:{gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
+    model = pretrained_model.lwm(
+        element_length=ELEMENT_LENGTH,
+        d_model=D_MODEL,
+        n_layers=N_LAYERS,
+        max_len=MAX_LEN,
+        n_heads=N_HEADS,
+        dropout=DROPOUT
+    ).to(device)
+
+    # Optional: Load pre-trained model
+    load_model = False
+    if load_model:
+        model.load_state_dict(torch.load("models/model_checkpoint.pth", map_location=device))
+        print("Pre-trained model loaded successfully.")
+
+    # Use DataParallel for multi-GPU support
+    model = nn.DataParallel(model, device_ids=gpu_ids)
+    print(f"Model loaded successfully on GPU {device.index}")
+    n_parameters = count_parameters(model)
+    print(f"Number of trainable parameters: {n_parameters:,}")
+
+    # =============================================================================
+    # 10. OPTIMIZER AND LEARNING RATE SCHEDULER
+    #     - Configure AdamW optimizer and a cosine-with-warmup LR schedule based on total steps
+    # =============================================================================
+
+    TOTAL_STEPS = sum(len(loader) for loader in train_loaders.values()) * EPOCHS
+    WARMUP_STEPS = sum(len(loader) for loader in train_loaders.values()) * WARMUP_EPOCHS
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=BASE_LR,
+        betas=(BETA1, BETA2),
+        weight_decay=WEIGHT_DECAY
     )
-del preprocessed_data_dict
 
-# =============================================================================
-# 8. DATALOADER CREATION
-#    - Build PyTorch DataLoader objects for batched training and validation
-# =============================================================================
+    def lr_lambda(current_step):
+        if current_step < WARMUP_STEPS:
+            return current_step / WARMUP_STEPS
+        else:
+            scaled_progress = (current_step - WARMUP_STEPS) / (TOTAL_STEPS - WARMUP_STEPS)
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * scaled_progress))
+            return cosine_decay * (BASE_LR - MIN_LR) / BASE_LR + MIN_LR / BASE_LR
 
-train_loaders = create_train_dataloader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-val_loaders = create_train_dataloader(val_data, batch_size=VAL_BATCH_SIZE, shuffle=False)
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-# =============================================================================
-# 9. MODEL INITIALIZATION
-#    - Instantiate the LWM transformer model and optionally load pre-trained weights
-#    - Wrap with DataParallel for multi-GPU support
-# =============================================================================
+    # =============================================================================
+    # 11. PRE-TRAINING LOOP
+    #     - Call the train_lwm utility to run the pre-training epochs, logging metrics and saving models
+    # =============================================================================
 
-gpu_ids = [0,1] # device_idx
-device = torch.device(f"cuda:{gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
-model = pretrained_model.lwm(
-    element_length=ELEMENT_LENGTH,
-    d_model=D_MODEL,
-    n_layers=N_LAYERS,
-    max_len=MAX_LEN,
-    n_heads=N_HEADS,
-    dropout=DROPOUT
-).to(device)
-
-# Optional: Load pre-trained model
-load_model = False
-if load_model:
-    model.load_state_dict(torch.load("models/model_checkpoint.pth", map_location=device))
-    print("Pre-trained model loaded successfully.")
-
-# Use DataParallel for multi-GPU support
-model = nn.DataParallel(model, device_ids=gpu_ids)
-print(f"Model loaded successfully on GPU {device.index}")
-n_parameters = count_parameters(model)
-print(f"Number of trainable parameters: {n_parameters:,}")
-
-# =============================================================================
-# 10. OPTIMIZER AND LEARNING RATE SCHEDULER
-#     - Configure AdamW optimizer and a cosine-with-warmup LR schedule based on total steps
-# =============================================================================
-
-TOTAL_STEPS = sum(len(loader) for loader in train_loaders.values()) * EPOCHS
-WARMUP_STEPS = sum(len(loader) for loader in train_loaders.values()) * WARMUP_EPOCHS
-
-optimizer = AdamW(
-    model.parameters(),
-    lr=BASE_LR,
-    betas=(BETA1, BETA2),
-    weight_decay=WEIGHT_DECAY
-)
-
-def lr_lambda(current_step):
-    if current_step < WARMUP_STEPS:
-        return current_step / WARMUP_STEPS
-    else:
-        scaled_progress = (current_step - WARMUP_STEPS) / (TOTAL_STEPS - WARMUP_STEPS)
-        cosine_decay = 0.5 * (1 + np.cos(np.pi * scaled_progress))
-        return cosine_decay * (BASE_LR - MIN_LR) / BASE_LR + MIN_LR / BASE_LR
-
-scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
-
-# =============================================================================
-# 11. PRE-TRAINING LOOP
-#     - Call the train_lwm utility to run the pre-training epochs, logging metrics and saving models
-# =============================================================================
-
-pretrained_model = train_lwm(
-    model,
-    train_loaders,
-    val_loaders,
-    optimizer,
-    scheduler,
-    EPOCHS,
-    device=device,
-    save_dir="pretrained_models",
-    log_file="training_log.csv"
-)
+    pretrained_model = train_lwm(
+        model,
+        train_loaders,
+        val_loaders,
+        optimizer,
+        scheduler,
+        EPOCHS,
+        device=device,
+        save_dir="pretrained_models",
+        log_file="training_log.csv"
+    )
