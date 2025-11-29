@@ -288,22 +288,22 @@ def DeepMIMO_data_gen(scenario, num_ant_hor, num_ant_vert, n_subcarriers, bs_idx
             manual_unzip_scenario(scenario)
 
     data = dm.load(scenario, tx_sets=[bs_idx], rx_sets=[grid_idx])
-    
+
     if row_indices is not None:
         if grid_idx == 0:
-            row_idxs = data.get_row_idxs(row_indices) # example: row_indices = np.arange(40,60)
-            data = data.subset(row_idxs)
+            row_idxs = data.get_idxs(mode='row', row_idxs=row_indices)  # example: row_indices = np.arange(40,60)
+            data = data._trim_by_index(row_idxs)
         elif grid_idx == 1:
             if scenario == "o1_3p5":
-                col_idxs = data.get_col_idxs(row_indices-2751)
-                data = data.subset(col_idxs)
+                col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-2751)
+                data = data._trim_by_index(col_idxs)
             elif scenario == "boston5G_3p5":
-                row_idxs = data.get_row_idxs(row_indices-812)
-                data = data.subset(row_idxs)
+                row_idxs = data.get_idxs(mode='row', row_idxs=row_indices-812)
+                data = data._trim_by_index(row_idxs)
         elif grid_idx == 2:
             if scenario == "o1_3p5":
-                col_idxs = data.get_col_idxs(row_indices-3852)
-            data = data.subset(col_idxs)
+                col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-3852)
+            data = data._trim_by_index(col_idxs)
     
     # data.plot_coverage(data.los)
     data.compute_channels(parameters)
@@ -631,8 +631,15 @@ class LazyLoadDataset(torch.utils.data.Dataset):
 
         # Load pickle file if not cached
         if file_idx not in self._cache:
-            with open(self.pickle_file_paths[file_idx], 'rb') as f:
-                self._cache[file_idx] = pickle.load(f)
+            try:
+                with open(self.pickle_file_paths[file_idx], 'rb') as f:
+                    self._cache[file_idx] = pickle.load(f)
+            except (EOFError, pickle.UnpicklingError) as e:
+                raise RuntimeError(
+                    f"Corrupted pickle file detected: {self.pickle_file_paths[file_idx]}\n"
+                    f"Error: {e}\n"
+                    f"Please delete this file and re-run the data generation."
+                ) from e
 
         # Get the sample: [input_ids, masked_tokens, masked_pos]
         sample = self._cache[file_idx][sample_idx]
@@ -852,7 +859,9 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
         plt.title("Training and Validation Losses")
         plt.legend()
         plt.grid(True)
-        plt.show()
+        plt.savefig("training_losses.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        print("Training loss plot saved to: training_losses.png")
 
     print("Training and validation complete.")
     return model
@@ -949,7 +958,12 @@ def visualize_embeddings(embeddings, labels=None, method="tsne", label=None):
     plt.title(f"{title} ({method.upper()})")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
-    plt.show()
+
+    # Save plot to file instead of showing
+    filename = f"embedding_viz_{method}.png"
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Embedding visualization saved to: {filename}")
 
 
 def embedding_space_visual(model, data, input_type="cls_emb", device="cpu", batch_size=64, task=None, visualization=False, labels=None, visualization_method="tsne", selected_tokens=0):
