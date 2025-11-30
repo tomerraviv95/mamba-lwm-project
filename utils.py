@@ -654,12 +654,13 @@ class LazyLoadDataset(torch.utils.data.Dataset):
 def create_train_dataloader(grouped_data, batch_size, shuffle):
     """
     Creates a dictionary of DataLoaders using lazy-loading datasets.
+    Automatically adjusts batch size based on sequence length to prevent OOM errors.
 
     Args:
         grouped_data (dict): Dictionary mapping seq_len to (file_metadata, indices)
             where file_metadata = [(filepath, num_samples), ...]
             and indices = [(file_idx, sample_idx), ...]
-        batch_size (int): Batch size for DataLoaders
+        batch_size (int): Base batch size for shortest sequences
         shuffle (bool): Whether to shuffle data
 
     Returns:
@@ -667,9 +668,18 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
     """
     dataloaders = {}
 
+    # Define base sequence length (shortest sequence) for batch size scaling
+    min_seq_len = min([int(k) for k in grouped_data.keys()])
+
     for seq_length, (file_metadata, indices) in grouped_data.items():
         print(f"\nCreating dataloader for sequence length: {seq_length}")
         print(f"  Number of samples: {len(indices)}")
+
+        # Calculate adjusted batch size based on sequence length
+        # Memory usage scales roughly with sequence length squared (for attention)
+        # So we reduce batch size inversely proportional to sequence length
+        seq_len_int = int(seq_length)
+        adjusted_batch_size = max(4, int(batch_size * (min_seq_len / seq_len_int)))
 
         # Extract file paths from metadata
         file_paths = [filepath for filepath, _ in file_metadata]
@@ -682,13 +692,13 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
         # Setting to 0 for Windows compatibility (single-process loading)
         dataloaders[seq_length] = DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=adjusted_batch_size,
             shuffle=shuffle,
             pin_memory=True,
             num_workers=0  # Set to 0 for Windows; use 2-4 on Linux/Mac
         )
 
-        print(f"  DataLoader created with batch_size={batch_size}, num_workers=0")
+        print(f"  DataLoader created with batch_size={adjusted_batch_size} (base={batch_size}, seq_len={seq_length}), num_workers=0")
 
     return dataloaders
 
