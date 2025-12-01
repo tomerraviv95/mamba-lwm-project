@@ -622,6 +622,7 @@ class LazyLoadDataset(torch.utils.data.Dataset):
         self.pickle_file_paths = pickle_file_paths
         self.indices = indices  # [(file_idx, sample_idx), ...]
         self._cache = {}  # Cache loaded pickle files in memory
+        self._cache_order = []  # Track access order for LRU eviction
 
     def __len__(self):
         return len(self.indices)
@@ -634,12 +635,30 @@ class LazyLoadDataset(torch.utils.data.Dataset):
             try:
                 with open(self.pickle_file_paths[file_idx], 'rb') as f:
                     self._cache[file_idx] = pickle.load(f)
+                self._cache_order.append(file_idx)
+            except MemoryError:
+                # Only evict when we actually run out of memory
+                # Clear the oldest half of cached files
+                num_to_evict = max(1, len(self._cache) // 2)
+                for _ in range(num_to_evict):
+                    if self._cache_order:
+                        oldest_file_idx = self._cache_order.pop(0)
+                        del self._cache[oldest_file_idx]
+
+                # Retry loading after eviction
+                with open(self.pickle_file_paths[file_idx], 'rb') as f:
+                    self._cache[file_idx] = pickle.load(f)
+                self._cache_order.append(file_idx)
             except (EOFError, pickle.UnpicklingError) as e:
                 raise RuntimeError(
                     f"Corrupted pickle file detected: {self.pickle_file_paths[file_idx]}\n"
                     f"Error: {e}\n"
                     f"Please delete this file and re-run the data generation."
                 ) from e
+        else:
+            # Move to end of LRU list (most recently used)
+            self._cache_order.remove(file_idx)
+            self._cache_order.append(file_idx)
 
         # Get the sample: [input_ids, masked_tokens, masked_pos]
         sample = self._cache[file_idx][sample_idx]
@@ -679,7 +698,7 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
         # Memory usage scales roughly with sequence length squared (for attention)
         # So we reduce batch size inversely proportional to sequence length
         seq_len_int = int(seq_length)
-        adjusted_batch_size = max(4, int(batch_size * (min_seq_len / seq_len_int)))
+        adjusted_batch_size = max(8, int(batch_size * (min_seq_len / seq_len_int)))
 
         # Extract file paths from metadata
         file_paths = [filepath for filepath, _ in file_metadata]
@@ -688,7 +707,7 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
         dataset = LazyLoadDataset(file_paths, indices)
 
         # Create DataLoader with multiple workers for parallel I/O
-        # Note: On Windows, num_workers > 0 requires if __name__ == '__main__' guard
+        # Note: On Windows, num_workers > 0 can cause memory issues with pickle caching
         # Setting to 0 for Windows compatibility (single-process loading)
         dataloaders[seq_length] = DataLoader(
             dataset,
@@ -800,6 +819,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                     # Update progress bar with MSE
                     t.set_postfix({"mse": train_mse / train_samples, "lr": scheduler.get_last_lr()[0]})
 
+            # Clear cache after processing this sequence length
+            train_loader.dataset._cache.clear()
+            train_loader.dataset._cache_order.clear()
+
         # Average MSE across training samples
         train_mse = train_mse / max(train_samples, 1)
         train_mse_losses.append(train_mse)
@@ -823,7 +846,7 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                             # Forward pass
                             logits_lm = model(input_ids, masked_pos)[0]
 
-                            # Compute MSE loss 
+                            # Compute MSE loss
                             mse = criterion(masked_tokens, logits_lm)
                             val_mse += mse.item()
 
@@ -837,6 +860,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
 
                             # Update progress bar with both MSE and NMSE
                             t.set_postfix({"mse": val_mse / val_samples, "nmse": val_nmse / val_samples})
+
+                    # Clear cache after processing this sequence length
+                    val_loader.dataset._cache.clear()
+                    val_loader.dataset._cache_order.clear()
 
             # Average MSE and NMSE across validation samples
             val_mse = val_mse / max(val_samples, 1)
