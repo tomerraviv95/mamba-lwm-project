@@ -700,7 +700,7 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
         # Memory usage scales roughly with sequence length squared (for attention)
         # So we reduce batch size inversely proportional to sequence length
         seq_len_int = int(seq_length)
-        adjusted_batch_size = max(8, int(batch_size * (min_seq_len / seq_len_int)))
+        adjusted_batch_size = max(16, int(batch_size * (min_seq_len / seq_len_int)))
 
         # Extract file paths from metadata
         file_paths = [filepath for filepath, _ in file_metadata]

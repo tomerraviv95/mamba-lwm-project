@@ -23,6 +23,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 import pretrained_model  # Assuming this contains the LWM model definition
+import mamba_model  # Mamba-based architecture
 from utils import (
     count_parameters,
     create_train_dataloader,
@@ -725,7 +726,7 @@ def scenario_prop():
 # =============================================================================
 
 EPOCHS = 50
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 VAL_BATCH_SIZE = 64
 WARMUP_EPOCHS = 5
 BASE_LR = 5e-4
@@ -754,9 +755,18 @@ task = [
     None,
 ][-1]
 
+# Model architecture selection: "transformer" or "mamba"
+MODEL_ARCHITECTURE = "transformer"  # Change to "mamba" to use Mamba-based architecture
+save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}"
+
+# Mamba-specific hyperparameters (only used if MODEL_ARCHITECTURE == "mamba")
+D_STATE = 16  # SSM state dimension
+D_CONV = 4    # Convolution kernel size
+EXPAND = 2    # Expansion factor for Mamba blocks
+
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [17, 33, 65, 129]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17, 33]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -1076,20 +1086,42 @@ if __name__ == "__main__":
 
     # =============================================================================
     # 9. MODEL INITIALIZATION
-    #    - Instantiate the LWM transformer model and optionally load pre-trained weights
+    #    - Instantiate the LWM model (transformer or mamba) and optionally load pre-trained weights
     #    - Wrap with DataParallel for multi-GPU support
     # =============================================================================
 
     gpu_ids = [0]  # device_idx
     device = torch.device(f"cuda:{gpu_ids[0]}" if torch.cuda.is_available() else "cpu")
-    model = pretrained_model.lwm(
-        element_length=ELEMENT_LENGTH,
-        d_model=D_MODEL,
-        n_layers=N_LAYERS,
-        max_len=MAX_LEN,
-        n_heads=N_HEADS,
-        dropout=DROPOUT,
-    ).to(device)
+
+    # Select model architecture based on MODEL_ARCHITECTURE flag
+    if MODEL_ARCHITECTURE.lower() == "mamba":
+        print("=" * 80)
+        print("Initializing Mamba-based LWM model")
+        print("=" * 80)
+        model = mamba_model.lwm_mamba(
+            element_length=ELEMENT_LENGTH,
+            d_model=D_MODEL,
+            n_layers=N_LAYERS,
+            max_len=MAX_LEN,
+            d_state=D_STATE,
+            d_conv=D_CONV,
+            expand=EXPAND,
+            dropout=DROPOUT,
+        ).to(device)
+    elif MODEL_ARCHITECTURE.lower() == "transformer":
+        print("=" * 80)
+        print("Initializing Transformer-based LWM model")
+        print("=" * 80)
+        model = pretrained_model.lwm(
+            element_length=ELEMENT_LENGTH,
+            d_model=D_MODEL,
+            n_layers=N_LAYERS,
+            max_len=MAX_LEN,
+            n_heads=N_HEADS,
+            dropout=DROPOUT,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model architecture: {MODEL_ARCHITECTURE}. Choose 'transformer' or 'mamba'.")
 
     # Optional: Load pre-trained model
     load_model = False
@@ -1104,6 +1136,8 @@ if __name__ == "__main__":
     print(f"Model loaded successfully on GPU {device.index}")
     n_parameters = count_parameters(model)
     print(f"Number of trainable parameters: {n_parameters:,}")
+    print(f"Architecture: {MODEL_ARCHITECTURE}")
+    print("=" * 80)
 
     # =============================================================================
     # 10. OPTIMIZER AND LEARNING RATE SCHEDULER
@@ -1142,6 +1176,6 @@ if __name__ == "__main__":
         scheduler,
         EPOCHS,
         device=device,
-        save_dir="pretrained_models",
+        save_dir=save_dir,
         log_file="training_log.csv",
     )
