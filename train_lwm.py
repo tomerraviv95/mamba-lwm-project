@@ -756,7 +756,7 @@ task = [
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [33, 65]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17, 33, 65, 129]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -961,6 +961,14 @@ if __name__ == "__main__":
     print("Collecting tokenized data file metadata...")
     print("=" * 80)
 
+    # Apply sequence length filter if specified
+    if FILTER_SEQ_LENGTHS:
+        print(f"\nFiltering to specific sequence lengths: {sorted(FILTER_SEQ_LENGTHS)}")
+        filter_keys = set(str(length) for length in FILTER_SEQ_LENGTHS)
+    else:
+        print("\nUsing all sequence lengths")
+        filter_keys = None
+
     file_metadata = defaultdict(list)  # {seq_len: [(filepath, num_samples), ...]}
 
     # Iterate through sequence length subdirectories
@@ -968,6 +976,11 @@ if __name__ == "__main__":
         seq_len_dir = os.path.join(tokenized_base_dir, seq_len_key)
 
         if os.path.isdir(seq_len_dir):
+            # Skip if filtering is enabled and this sequence length is not in the filter
+            if filter_keys and seq_len_key not in filter_keys:
+                print(f"\nSkipping sequence length: {seq_len_key} (not in filter)")
+                continue
+
             print(f"\nProcessing sequence length: {seq_len_key}")
 
             # Iterate through all pickle files in this subdirectory
@@ -1055,10 +1068,10 @@ if __name__ == "__main__":
     # =============================================================================
 
     train_loaders = create_train_dataloader(
-        train_data, batch_size=BATCH_SIZE, shuffle=True, filter_seq_lengths=FILTER_SEQ_LENGTHS
+        train_data, batch_size=BATCH_SIZE, shuffle=True
     )
     val_loaders = create_train_dataloader(
-        val_data, batch_size=VAL_BATCH_SIZE, shuffle=False, filter_seq_lengths=FILTER_SEQ_LENGTHS
+        val_data, batch_size=VAL_BATCH_SIZE, shuffle=False
     )
 
     # =============================================================================
