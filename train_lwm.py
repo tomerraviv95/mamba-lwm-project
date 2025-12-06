@@ -754,6 +754,10 @@ task = [
     None,
 ][-1]
 
+# Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
+# Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
+FILTER_SEQ_LENGTHS = [33, 65]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+
 # =============================================================================
 # 5. DATA GENERATION LOOP
 #    - Iterate over scenarios and base station indices to generate channel samples and labels
@@ -854,103 +858,103 @@ if __name__ == "__main__":
 
             labels.extend(scenario_labels)
 
-    # bs_idxs = [[1], [4, 15], [2]]
-    # for scenario_idx, scenario in enumerate(scenarios[-3:]):
-    #     for bs_idx in bs_idxs[scenario_idx]:
-    #         for zone in range(20):
-    #             row_start = scenario_properties[scenario + f"_v{zone + 1}"]["n_rows"][0]
-    #             row_end = scenario_properties[scenario + f"_v{zone + 1}"]["n_rows"][1]
-    #             grid_idx = (
-    #                 scenario_properties[scenario + f"_v{zone + 1}"]["grid_idx"] - 1
-    #             )
-    #             print(f"Processing scenario: {scenario}, BS #{bs_idx}, Zone {zone}")
+    bs_idxs = [[1], [4, 15], [2]]
+    for scenario_idx, scenario in enumerate(scenarios[-3:]):
+        for bs_idx in bs_idxs[scenario_idx]:
+            for zone in range(20):
+                row_start = scenario_properties[scenario + f"_v{zone + 1}"]["n_rows"][0]
+                row_end = scenario_properties[scenario + f"_v{zone + 1}"]["n_rows"][1]
+                grid_idx = (
+                    scenario_properties[scenario + f"_v{zone + 1}"]["grid_idx"] - 1
+                )
+                print(f"Processing scenario: {scenario}, BS #{bs_idx}, Zone {zone}")
 
-    #             # Create a unique cache filename for this scenario + bs_idx combination
-    #             cache_filename = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
-    #             cache_filepath = os.path.join(cache_dir, cache_filename)
+                # Create a unique cache filename for this scenario + bs_idx combination
+                cache_filename = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
+                cache_filepath = os.path.join(cache_dir, cache_filename)
 
-    #             # Check if cached data exists
-    #             if os.path.exists(cache_filepath):
-    #                 print(
-    #                     f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}"
-    #                 )
-    #                 with open(cache_filepath, "rb") as f:
-    #                     cached_data = pickle.load(f)
-    #                     scenario_channels = cached_data["channels"]
-    #                     scenario_labels = cached_data["labels"]
-    #             else:
-    #                 # Generate data if cache doesn't exist
-    #                 scenario_channels, scenario_labels = generate_channels_and_labels(
-    #                     n_ant_bs=scenario_properties[scenario + f"_v{zone + 1}"][
-    #                         "n_ant_bs"
-    #                     ],
-    #                     n_subcarriers=scenario_properties[scenario + f"_v{zone + 1}"][
-    #                         "n_subcarriers"
-    #                     ],
-    #                     grid_idx=grid_idx,
-    #                     bs_idx=bs_idx,
-    #                     scenario_name=scenario,
-    #                     rows=np.arange(row_start, row_end),
-    #                     task=task,
-    #                     n_beams=64,
-    #                 )
+                # Check if cached data exists
+                if os.path.exists(cache_filepath):
+                    print(
+                        f"\nLoading cached data for scenario: {scenario}, BS #{bs_idx}"
+                    )
+                    with open(cache_filepath, "rb") as f:
+                        cached_data = pickle.load(f)
+                        scenario_channels = cached_data["channels"]
+                        scenario_labels = cached_data["labels"]
+                else:
+                    # Generate data if cache doesn't exist
+                    scenario_channels, scenario_labels = generate_channels_and_labels(
+                        n_ant_bs=scenario_properties[scenario + f"_v{zone + 1}"][
+                            "n_ant_bs"
+                        ],
+                        n_subcarriers=scenario_properties[scenario + f"_v{zone + 1}"][
+                            "n_subcarriers"
+                        ],
+                        grid_idx=grid_idx,
+                        bs_idx=bs_idx,
+                        scenario_name=scenario,
+                        rows=np.arange(row_start, row_end),
+                        task=task,
+                        n_beams=64,
+                    )
 
-    #                 # Save to cache
-    #                 print(f"Saving data to cache: {cache_filepath}")
-    #                 with open(cache_filepath, "wb") as f:
-    #                     pickle.dump(
-    #                         {"channels": scenario_channels, "labels": scenario_labels},
-    #                         f,
-    #                         protocol=5
-    #                     )
+                    # Save to cache
+                    print(f"Saving data to cache: {cache_filepath}")
+                    with open(cache_filepath, "wb") as f:
+                        pickle.dump(
+                            {"channels": scenario_channels, "labels": scenario_labels},
+                            f,
+                            protocol=5
+                        )
 
-                # # Check if scenario has any valid channels before tokenizing
-                # if len(scenario_channels) == 0:
-                #     print(f"\nSkipping scenario: {scenario}, BS #{bs_idx}, Zone {zone} (no valid channels)")
-                #     continue
+                # Check if scenario has any valid channels before tokenizing
+                if len(scenario_channels) == 0:
+                    print(f"\nSkipping scenario: {scenario}, BS #{bs_idx}, Zone {zone} (no valid channels)")
+                    continue
 
-                # # Check if tokenized data already exists by searching all sequence length directories
-                # pkl_filename_pattern = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
-                # tokenized_files_exist = False
-                # if os.path.exists(tokenized_base_dir):
-                #     for seq_len_dir in os.listdir(tokenized_base_dir):
-                #         seq_len_path = os.path.join(tokenized_base_dir, seq_len_dir)
-                #         if os.path.isdir(seq_len_path):
-                #             pkl_filepath = os.path.join(seq_len_path, pkl_filename_pattern)
-                #             if os.path.exists(pkl_filepath):
-                #                 tokenized_files_exist = True
-                #                 break
+                # Check if tokenized data already exists by searching all sequence length directories
+                pkl_filename_pattern = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
+                tokenized_files_exist = False
+                if os.path.exists(tokenized_base_dir):
+                    for seq_len_dir in os.listdir(tokenized_base_dir):
+                        seq_len_path = os.path.join(tokenized_base_dir, seq_len_dir)
+                        if os.path.isdir(seq_len_path):
+                            pkl_filepath = os.path.join(seq_len_path, pkl_filename_pattern)
+                            if os.path.exists(pkl_filepath):
+                                tokenized_files_exist = True
+                                break
 
-                # if tokenized_files_exist:
-                #     print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, Zone {zone}, skipping tokenization")
-                #     continue
+                if tokenized_files_exist:
+                    print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, Zone {zone}, skipping tokenization")
+                    continue
 
-                # # Tokenize the data
-                # print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}, Zone {zone}")
-                # scenario_preprocessed_dict = tokenizer_train(
-                #     [scenario_channels],
-                #     max_len=MAX_LEN,
-                #     masking_percent=MASK_PERCENT,
-                #     mask=True,
-                #     seed=42,
-                # )
+                # Tokenize the data
+                print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}, Zone {zone}")
+                scenario_preprocessed_dict = tokenizer_train(
+                    [scenario_channels],
+                    max_len=MAX_LEN,
+                    masking_percent=MASK_PERCENT,
+                    mask=True,
+                    seed=42,
+                )
 
-                # # Save tokenized data to pickle files organized by sequence length
-                # for key, value in scenario_preprocessed_dict.items():
-                #     # Create subdirectory for this sequence length (key)
-                #     seq_len_dir = os.path.join(tokenized_base_dir, str(key))
-                #     os.makedirs(seq_len_dir, exist_ok=True)
+                # Save tokenized data to pickle files organized by sequence length
+                for key, value in scenario_preprocessed_dict.items():
+                    # Create subdirectory for this sequence length (key)
+                    seq_len_dir = os.path.join(tokenized_base_dir, str(key))
+                    os.makedirs(seq_len_dir, exist_ok=True)
 
-                #     # Create pickle filename based on scenario, bs_idx, and zone
-                #     pkl_filename = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
-                #     pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
+                    # Create pickle filename based on scenario, bs_idx, and zone
+                    pkl_filename = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
+                    pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
 
-                #     # Save to pickle
-                #     print(f"Saving tokenized data to: {pkl_filepath}")
-                #     with open(pkl_filepath, "wb") as f:
-                #         pickle.dump(value, f, protocol=5)
+                    # Save to pickle
+                    print(f"Saving tokenized data to: {pkl_filepath}")
+                    with open(pkl_filepath, "wb") as f:
+                        pickle.dump(value, f, protocol=5)
 
-                # labels.extend(scenario_labels)
+                labels.extend(scenario_labels)
 
     # Collect tokenized data file metadata (lazy loading - don't load all data into memory)
     print("\n" + "=" * 80)
@@ -1051,10 +1055,10 @@ if __name__ == "__main__":
     # =============================================================================
 
     train_loaders = create_train_dataloader(
-        train_data, batch_size=BATCH_SIZE, shuffle=True
+        train_data, batch_size=BATCH_SIZE, shuffle=True, filter_seq_lengths=FILTER_SEQ_LENGTHS
     )
     val_loaders = create_train_dataloader(
-        val_data, batch_size=VAL_BATCH_SIZE, shuffle=False
+        val_data, batch_size=VAL_BATCH_SIZE, shuffle=False, filter_seq_lengths=FILTER_SEQ_LENGTHS
     )
 
     # =============================================================================

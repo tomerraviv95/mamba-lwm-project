@@ -670,7 +670,7 @@ class LazyLoadDataset(torch.utils.data.Dataset):
 
         return input_ids, masked_tokens, masked_pos
 
-def create_train_dataloader(grouped_data, batch_size, shuffle):
+def create_train_dataloader(grouped_data, batch_size, shuffle, filter_seq_lengths=None):
     """
     Creates a dictionary of DataLoaders using lazy-loading datasets.
     Automatically adjusts batch size based on sequence length to prevent OOM errors.
@@ -681,16 +681,34 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
             and indices = [(file_idx, sample_idx), ...]
         batch_size (int): Base batch size for shortest sequences
         shuffle (bool): Whether to shuffle data
+        filter_seq_lengths (list or None): Optional list of sequence lengths to include.
+            If None or empty, all sequence lengths are used.
 
     Returns:
         dict: Dictionary mapping seq_len to DataLoader
     """
     dataloaders = {}
 
-    # Define base sequence length (shortest sequence) for batch size scaling
-    min_seq_len = min([int(k) for k in grouped_data.keys()])
+    # Filter sequence lengths if specified
+    if filter_seq_lengths:
+        # Convert to string keys to match grouped_data keys
+        filter_keys = set(str(length) for length in filter_seq_lengths)
+        filtered_data = {k: v for k, v in grouped_data.items() if k in filter_keys}
+        print(f"\nFiltering to specific sequence lengths: {sorted([int(k) for k in filter_keys])}")
+        print(f"  Available sequence lengths: {sorted([int(k) for k in grouped_data.keys()])}")
+        print(f"  Using sequence lengths: {sorted([int(k) for k in filtered_data.keys()])}")
+    else:
+        filtered_data = grouped_data
+        print(f"\nUsing all sequence lengths: {sorted([int(k) for k in grouped_data.keys()])}")
 
-    for seq_length, (file_metadata, indices) in grouped_data.items():
+    if not filtered_data:
+        print("WARNING: No sequence lengths match the filter! Using all sequence lengths.")
+        filtered_data = grouped_data
+
+    # Define base sequence length (shortest sequence) for batch size scaling
+    min_seq_len = min([int(k) for k in filtered_data.keys()])
+
+    for seq_length, (file_metadata, indices) in filtered_data.items():
         print(f"\nCreating dataloader for sequence length: {seq_length}")
         print(f"  Number of samples: {len(indices)}")
 
@@ -758,7 +776,7 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
     """
     Trains the Large Wireless Model (LWM) using masked channel modeling on grouped datasets of various sequence lengths.
 
-    The training alternates between training and evaluation every 2 epochs. For each sequence length, 
+    The training alternates between training and evaluation every 2 epochs. For each sequence length,
     a separate DataLoader is used. MSE is used for the training objective, and both MSE and NMSE are computed
     during validation for performance tracking.
 
