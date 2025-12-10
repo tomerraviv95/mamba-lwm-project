@@ -726,7 +726,7 @@ def scenario_prop():
 # =============================================================================
 
 EPOCHS = 50
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 VAL_BATCH_SIZE = 64
 WARMUP_EPOCHS = 5
 BASE_LR = 5e-4
@@ -756,13 +756,13 @@ task = [
 ][-1]
 
 # Model architecture selection: "transformer" or "mamba"
-MODEL_ARCHITECTURE = "transformer"  # Change to "mamba" to use Mamba-based architecture
+MODEL_ARCHITECTURE = "mamba"  # Change to "mamba" to use Mamba-based architecture
 save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}"
 
 # Mamba-specific hyperparameters (only used if MODEL_ARCHITECTURE == "mamba")
-D_STATE = 16  # SSM state dimension
+D_STATE = 8  # SSM state dimension
 D_CONV = 4    # Convolution kernel size
-EXPAND = 2    # Expansion factor for Mamba blocks
+EXPAND = 1.2    # Expansion factor for Mamba blocks
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths

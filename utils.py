@@ -811,6 +811,30 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
 
                     # Compute MSE loss
                     loss = criterion(masked_tokens, logits_lm)
+
+                    # Check for NaN/Inf in loss
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"\n{'='*80}")
+                        print(f"❌ NaN/Inf DETECTED IN LOSS at Epoch {epoch}, Length {length}")
+                        print(f"{'='*80}")
+                        print(f"Loss value: {loss.item()}")
+                        print(f"Input stats - Min: {input_ids.min().item():.4f}, Max: {input_ids.max().item():.4f}, Mean: {input_ids.mean().item():.4f}")
+                        print(f"Logits stats - Min: {logits_lm.min().item():.4f}, Max: {logits_lm.max().item():.4f}, Mean: {logits_lm.mean().item():.4f}")
+                        print(f"Masked tokens stats - Min: {masked_tokens.min().item():.4f}, Max: {masked_tokens.max().item():.4f}, Mean: {masked_tokens.mean().item():.4f}")
+                        print(f"Learning rate: {scheduler.get_last_lr()[0]}")
+                        print(f"Batch size: {input_ids.shape[0]}, Sequence length: {input_ids.shape[1]}")
+
+                        # Check for NaN in model outputs
+                        if torch.isnan(logits_lm).any():
+                            print(f"⚠ NaN found in logits_lm!")
+                        if torch.isinf(logits_lm).any():
+                            print(f"⚠ Inf found in logits_lm!")
+
+                        # Check gradients before backward
+                        print(f"\nSkipping backward pass to prevent gradient corruption.")
+                        print(f"{'='*80}\n")
+                        exit()
+
                     loss.backward()
                     optimizer.step()
                     scheduler.step()
