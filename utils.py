@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
+import csv
 from tqdm import tqdm
 import pickle
 import deepmimo as dm
@@ -316,19 +317,19 @@ def DeepMIMO_data_gen(scenario, num_ant_hor, num_ant_vert, n_subcarriers, bs_idx
 
     if row_indices is not None:
         if grid_idx == 0:
-            row_idxs = data.get_idxs(mode='row', row_idxs=row_indices) # example: row_indices = np.arange(40,60)
-            data = data.trim(idxs=row_idxs)
+            row_idxs = data.get_idxs(mode='row', row_idxs=row_indices)  # example: row_indices = np.arange(40,60)
+            data = data._trim_by_index(row_idxs)
         elif grid_idx == 1:
             if scenario == "o1_3p5":
                 col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-2751)
-                data = data.trim(idxs=col_idxs)
+                data = data._trim_by_index(col_idxs)
             elif scenario == "boston5G_3p5":
                 row_idxs = data.get_idxs(mode='row', row_idxs=row_indices-812)
-                data = data.trim(idxs=row_idxs)
+                data = data._trim_by_index(row_idxs)
         elif grid_idx == 2:
             if scenario == "o1_3p5":
                 col_idxs = data.get_idxs(mode='col', col_idxs=row_indices-3852)
-            data = data.trim(idxs=col_idxs)
+            data = data._trim_by_index(col_idxs)
     
     # data.plot_coverage(data.los)
     data.compute_channels(parameters)
@@ -405,168 +406,39 @@ def tokenizer_train(channels,
         dict or torch.Tensor: If mask is True, returns a dictionary mapping sequence lengths to lists
             of tokenized samples. If mask is False, returns a tensor of stacked tokenized samples.
     """
-    # Setup patches cache directory
-    if patches_cache_dir is None:
-        # Use subdirectory under scenarios cache
-        base_cache = os.path.join(os.path.dirname(__file__), "..", "scenarios_cache_lwm")
-        if os.path.exists(r"C:\Users\tomer\scenarios_cache_lwm"):
-            base_cache = r"C:\Users\tomer\scenarios_cache_lwm"
-        patches_cache_dir = os.path.join(base_cache, "patches_cache")
-
-    os.makedirs(patches_cache_dir, exist_ok=True)
-
-    # Check if tokenized files already exist (resume support)
-    existing_files = [f for f in os.listdir(patches_cache_dir) if f.endswith('.pkl')]
-    skip_tokenization = False
-
-    if existing_files:
-        print(f"\n{'='*60}")
-        print(f"Found {len(existing_files)} existing tokenized files in:")
-        print(f"  {patches_cache_dir}")
-        print(f"{'='*60}")
-        response = input("\nReuse existing tokenized data? (y/n): ").strip().lower()
-
-        if response == 'y':
-            skip_tokenization = True
-            print("Skipping tokenization, will load existing files...")
-
-            # Build temp_files mapping from existing files
-            temp_files = defaultdict(list)
-            for filename in existing_files:
-                # Parse filename: seq{seq_length}_batch{batch_num}.pkl
-                if filename.startswith('seq') and '_batch' in filename:
-                    try:
-                        seq_part = filename.split('_batch')[0]
-                        seq_length = int(seq_part.replace('seq', ''))
-                        filepath = os.path.join(patches_cache_dir, filename)
-                        temp_files[seq_length].append(filepath)
-                    except ValueError:
-                        print(f"Warning: Could not parse filename {filename}")
-
-            # Sort file lists to ensure consistent order
-            for seq_length in temp_files:
-                temp_files[seq_length].sort()
-
-            # Delete channels immediately since we won't need them
-            del channels
-            cleanup_memory()
-            print_memory_usage("AFTER Loading (channels deleted, using cached data)")
-        else:
-            print("Regenerating tokenized data from scratch...")
-            # Clean up old files
-            for filename in existing_files:
-                os.remove(os.path.join(patches_cache_dir, filename))
-            print(f"Cleaned up {len(existing_files)} old files")
-
-    # Track temp files by sequence length
-    if not skip_tokenization:
-        temp_files = defaultdict(list)
-    n_scenarios = len(channels) if not skip_tokenization else 0
-
-    # Only run tokenization if not using cached data
-    if not skip_tokenization:
-        # First, generate all patches and count total samples
-        print(f"\nStep 1: Generating patches from {n_scenarios} scenarios...")
-        all_patches = []
-        for channel_set in tqdm(channels, desc="Creating patches"):
-            scenario_patches = patch_maker(channel_set, patch_rows=4, patch_cols=4)
-            # Flatten scenario patches into individual samples
-            for patch in scenario_patches:
-                all_patches.append(patch)
-
-        # Delete channels immediately after patch generation
-        total_samples = len(all_patches)
-        print(f"\nTotal samples to process: {total_samples}")
-        del channels
-        cleanup_memory()
-        print_memory_usage("AFTER Patch Generation (channels deleted)")
-
-        print(f"\nStep 2: Tokenizing {total_samples} samples in batches of {batch_size}...")
-        print(f"Temp directory: {patches_cache_dir}")
-
-    try:
-        # PHASE 1: Process patches in batches and save to disk (only if not skipping)
-        if not skip_tokenization:
-            batch_counter = 0
-            for batch_start in tqdm(range(0, total_samples, batch_size), desc="Tokenizing batches"):
-                batch_end = min(batch_start + batch_size, total_samples)
-                batch_patches = all_patches[batch_start:batch_end]
-
-                # Tokenize each sample in this batch
-                batch_samples = defaultdict(list)  # {seq_length: [samples]}
-
-                for user_idx in range(len(batch_patches)):
-                    patch_size = batch_patches[user_idx].shape[1]
-                    n_patches = batch_patches[user_idx].shape[0]
-                    n_masks_half = int(masking_percent * n_patches)
-
-                    word2id = {
-                        '[CLS]': 0.2 * np.ones((patch_size)),
-                        '[MASK]': 0.1 * np.ones((patch_size))
-                    }
-
-                    sample = make_sample(
-                        user_idx, batch_patches, word2id, n_patches, n_masks_half,
-                        patch_size, mask=mask, seed=seed
-                    )
-
-                    if mask:
-                        seq_length = len(sample[0])
-                        batch_samples[seq_length].append(sample)
-                    else:
-                        batch_samples[0].append(sample)
-
-                # Save this batch to disk
-                for seq_length, samples in batch_samples.items():
-                    temp_file = f"seq{seq_length}_batch{batch_counter}.pkl"
-                    filepath = os.path.join(patches_cache_dir, temp_file)
-                    with open(filepath, 'wb') as f:
-                        pickle.dump(samples, f)
-                    temp_files[seq_length].append(filepath)
-
-                # Critical: Delete batch data immediately to free memory
-                del batch_patches, batch_samples
-                cleanup_memory()
-
-                batch_counter += 1
-
-            # Delete all_patches after processing
-            print(f"\nTokenization complete: {batch_counter} batches processed")
-            del all_patches
-            cleanup_memory()
-            print_memory_usage("AFTER Tokenization (all patches deleted)")
-
-        # PHASE 2: Read temp files back into grouped_data
-        grouped_data = defaultdict(list)
-        grouped_data_2 = []
-
-        print("\nReading tokenized samples from disk...")
-        total_samples = 0
-
-        for seq_length in tqdm(sorted(temp_files.keys()), desc="Loading batches"):
-            for temp_file_path in temp_files[seq_length]:
-                with open(temp_file_path, 'rb') as f:
-                    samples = pickle.load(f)
-                    if mask:
-                        grouped_data[seq_length].extend(samples)
-                        total_samples += len(samples)
-                    else:
-                        grouped_data_2.extend(samples)
-                        total_samples += len(samples)
-
-                # Delete temp file as we read it
-                os.remove(temp_file_path)
-
-        print(f"\nTotal number of samples: {total_samples}")
-
-        # Normalize grouped data
+    patches = [patch_maker(channel_set, patch_rows=4, patch_cols=4) for channel_set in channels]
+    patches = [patch for patch_list in patches for patch in patch_list]
+    print("\nTotal number of samples:", len(patches))
+    
+    grouped_data = defaultdict(list)  # Group samples by sequence length
+    grouped_data_2 = []
+    
+    for user_idx in tqdm(range(len(patches)), desc="Processing items"):
+        patch_size = patches[user_idx].shape[1]
+        n_patches = patches[user_idx].shape[0]
+        n_masks_half = int(masking_percent * n_patches)
+        
+        word2id = {
+            '[CLS]': 0.2 * np.ones((patch_size)),
+            '[MASK]': 0.1 * np.ones((patch_size))
+        }
+        
+        sample = make_sample(
+            user_idx, patches, word2id, n_patches, n_masks_half, patch_size, mask=mask, seed=seed
+        )
+        
         if mask:
-            normalized_grouped_data = {i: grouped_data[key]
-                                     for i, key in enumerate(sorted(grouped_data.keys()))}
+            seq_length = len(sample[0]) 
+            grouped_data[seq_length].append(sample)
         else:
-            normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
-
-        return normalized_grouped_data
+            grouped_data_2.append(sample)
+    
+    if mask:
+        normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
+    else: 
+        normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
+    
+    return normalized_grouped_data 
 
     finally:
         # Cleanup: Only remove temp directory if tokenization completed successfully
@@ -627,7 +499,7 @@ def tokenizer(channels,
             grouped_data_2.append(sample)
     
     if mask:
-        normalized_grouped_data = {i: grouped_data[key] for i, key in enumerate(sorted(grouped_data.keys()))}
+        normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
     else: 
         normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
     
@@ -785,241 +657,107 @@ def patch_reconstructor(patches, original_rows, original_cols, patch_rows=4, pat
 
     return reconstructed
 
-class LazyChannelDataset(torch.utils.data.Dataset):
+class LazyLoadDataset(torch.utils.data.Dataset):
     """
-    Lazy loading dataset that loads and tokenizes scenarios on-demand.
-
-    This dataset doesn't load all data into memory upfront. Instead:
-    1. Builds an index mapping sample_idx → (scenario, bs_idx, sample_offset)
-    2. Loads scenarios from cache only when needed
-    3. Keeps a small LRU cache of recently accessed scenarios
-    4. Tokenizes samples on-the-fly
-
-    This allows training on datasets much larger than available RAM.
-    """
-    def __init__(self, scenario_configs, cache_dir, max_len=513, masking_percent=0.40,
-                 mask=True, seed=42, max_cached_scenarios=3):
-        """
-        Args:
-            scenario_configs: List of dicts with keys: scenario_name, bs_idx, n_ant_bs,
-                            n_subcarriers, grid_idx, rows, task, n_beams
-            cache_dir: Directory where scenario cache files are stored
-            max_len: Maximum sequence length for tokenization
-            masking_percent: Percentage of patches to mask
-            mask: Whether to apply masking
-            seed: Random seed for masking
-            max_cached_scenarios: Max number of scenarios to keep in memory (LRU cache)
-        """
-        self.scenario_configs = scenario_configs
-        self.cache_dir = cache_dir
-        self.max_len = max_len
-        self.masking_percent = masking_percent
-        self.mask = mask
-        self.seed = seed
-        self.max_cached_scenarios = max_cached_scenarios
-
-        # LRU cache for loaded scenarios: {cache_key: (channels, labels)}
-        self.scenario_cache = {}
-        self.cache_access_order = []  # Track access order for LRU
-
-        # Build index: maps global sample index to (scenario_idx, sample_offset)
-        self.sample_index = []
-        self._build_index()
-
-    def _build_index(self):
-        """Build index mapping global sample idx to scenario and sample offset"""
-        print("\n" + "="*60)
-        print("Building lazy dataset index...")
-        print("="*60)
-
-        for scenario_idx, config in enumerate(self.scenario_configs):
-            cache_key = f"{config['scenario_name']}_bs{config['bs_idx']}"
-            cache_filepath = os.path.join(self.cache_dir, f"{cache_key}.pkl")
-
-            if not os.path.exists(cache_filepath):
-                print(f"WARNING: Cache file not found: {cache_filepath}")
-                continue
-
-            # Load just to get the count, then release immediately
-            with open(cache_filepath, 'rb') as f:
-                cached_data = pickle.load(f)
-                n_samples = cached_data['channels'].shape[0]
-
-            # Add all samples from this scenario to the index
-            for sample_offset in range(n_samples):
-                self.sample_index.append({
-                    'scenario_idx': scenario_idx,
-                    'sample_offset': sample_offset,
-                    'cache_key': cache_key
-                })
-
-            print(f"  [{scenario_idx}] {cache_key}: {n_samples} samples")
-
-        print(f"\nTotal samples in lazy dataset: {len(self.sample_index)}")
-        print("="*60 + "\n")
-
-    def _load_scenario(self, cache_key):
-        """Load a scenario from cache with LRU eviction"""
-        # Check if already in cache
-        if cache_key in self.scenario_cache:
-            # Move to end (most recently used)
-            self.cache_access_order.remove(cache_key)
-            self.cache_access_order.append(cache_key)
-            return self.scenario_cache[cache_key]
-
-        # Load from disk
-        cache_filepath = os.path.join(self.cache_dir, f"{cache_key}.pkl")
-        with open(cache_filepath, 'rb') as f:
-            cached_data = pickle.load(f)
-
-        channels = cached_data['channels']
-        labels = cached_data['labels']
-
-        # Evict least recently used scenario if cache is full
-        if len(self.scenario_cache) >= self.max_cached_scenarios:
-            lru_key = self.cache_access_order.pop(0)
-            del self.scenario_cache[lru_key]
-
-        # Add to cache
-        self.scenario_cache[cache_key] = (channels, labels)
-        self.cache_access_order.append(cache_key)
-
-        return channels, labels
-
-    def __len__(self):
-        return len(self.sample_index)
-
-    def __getitem__(self, idx):
-        """
-        Load and tokenize a single sample on-demand.
-
-        Returns:
-            If mask=True: (input_ids, masked_tokens, masked_pos)
-            If mask=False: input_ids tensor
-        """
-        # Get scenario and sample info
-        sample_info = self.sample_index[idx]
-        cache_key = sample_info['cache_key']
-        sample_offset = sample_info['sample_offset']
-
-        # Load scenario (from cache or disk)
-        channels, labels = self._load_scenario(cache_key)
-
-        # Get the specific channel sample
-        channel_sample = channels[sample_offset:sample_offset+1]  # Keep batch dimension
-
-        # Create patches for this single sample
-        patches = patch_maker(channel_sample, patch_rows=4, patch_cols=4)
-        patches = patches[0]  # Remove batch dimension, shape: (n_patches, patch_size)
-
-        # Tokenize this single sample
-        patch_size = patches.shape[1]
-        n_patches = patches.shape[0]
-        n_masks = int(self.masking_percent * n_patches)
-
-        word2id = {
-            '[CLS]': 0.2 * np.ones((patch_size)),
-            '[MASK]': 0.1 * np.ones((patch_size))
-        }
-
-        # Use deterministic seed based on global index for reproducibility
-        sample_seed = self.seed + idx if self.seed is not None else None
-
-        sample = make_sample(
-            user_idx=0,  # We only have one sample
-            patch=patches[np.newaxis, :, :],  # Add batch dimension back
-            word2id=word2id,
-            n_patches=n_patches,
-            n_masks=n_masks,
-            patch_size=patch_size,
-            mask=self.mask,
-            seed=sample_seed
-        )
-
-        return sample
-
-class ListDataset(torch.utils.data.Dataset):
-    """
-    Lightweight dataset wrapper that holds data as a list and converts to tensors on-demand.
-    This avoids creating giant tensors upfront, reducing memory usage significantly.
-    """
-    def __init__(self, data_list):
-        self.data = data_list
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-    def __len__(self):
-        return len(self.data)
-
-def collate_fn_efficient(batch):
-    """
-    Custom collate function that converts batch data to tensors on-the-fly.
-    This is called by DataLoader for each batch, avoiding the need to convert
-    the entire dataset to tensors upfront.
+    Lazy-loading dataset that reads samples from pickle files on-demand.
 
     Args:
-        batch: List of tuples (input_ids, masked_tokens, masked_pos)
-
-    Returns:
-        Tuple of tensors ready for model input
+        pickle_file_paths (list): List of paths to pickle files
+        indices (list): List of (file_idx, sample_idx) tuples indicating which samples to use
     """
-    input_ids, masked_tokens, masked_pos = zip(*batch)
+    def __init__(self, pickle_file_paths, indices):
+        self.pickle_file_paths = pickle_file_paths
+        self.indices = indices  # [(file_idx, sample_idx), ...]
+        self._cache = {}  # Cache loaded pickle files in memory
+        self._cache_order = []  # Track access order for LRU eviction
 
-    # Convert to numpy arrays first (more memory efficient than direct tensor conversion)
-    input_ids_np = np.array(input_ids, dtype=np.float32)
-    masked_tokens_np = np.array(masked_tokens, dtype=np.float32)
-    masked_pos_np = np.array(masked_pos, dtype=np.int64)
+    def __len__(self):
+        return len(self.indices)
 
-    # Convert to tensors
-    return (
-        torch.from_numpy(input_ids_np),
-        torch.from_numpy(masked_tokens_np),
-        torch.from_numpy(masked_pos_np)
-    )
+    def __getitem__(self, idx):
+        file_idx, sample_idx = self.indices[idx]
+
+        # Load pickle file if not cached
+        if file_idx not in self._cache:
+            try:
+                with open(self.pickle_file_paths[file_idx], 'rb') as f:
+                    self._cache[file_idx] = pickle.load(f)
+                self._cache_order.append(file_idx)
+            except MemoryError:
+                # Only evict when we actually run out of memory
+                # Clear the oldest half of cached files
+                num_to_evict = max(1, len(self._cache) // 2)
+                for _ in range(num_to_evict):
+                    if self._cache_order:
+                        oldest_file_idx = self._cache_order.pop(0)
+                        del self._cache[oldest_file_idx]
+
+                # Retry loading after eviction
+                with open(self.pickle_file_paths[file_idx], 'rb') as f:
+                    self._cache[file_idx] = pickle.load(f)
+                self._cache_order.append(file_idx)
+            except (EOFError, pickle.UnpicklingError) as e:
+                raise RuntimeError(
+                    f"Corrupted pickle file detected: {self.pickle_file_paths[file_idx]}\n"
+                    f"Error: {e}\n"
+                    f"Please delete this file and re-run the data generation."
+                ) from e
+        else:
+            # Move to end of LRU list (most recently used)
+            self._cache_order.remove(file_idx)
+            self._cache_order.append(file_idx)
+
+        # Get the sample: [input_ids, masked_tokens, masked_pos]
+        sample = self._cache[file_idx][sample_idx]
+
+        # Convert to tensors
+        input_ids = torch.tensor(sample[0], dtype=torch.float32)
+        masked_tokens = torch.tensor(sample[1], dtype=torch.float32)
+        masked_pos = torch.tensor(sample[2], dtype=torch.long)
+
+        return input_ids, masked_tokens, masked_pos
 
 def create_train_dataloader(grouped_data, batch_size, shuffle):
     """
-    Creates a dictionary of DataLoaders from grouped input data based on sequence lengths.
-
-    MEMORY OPTIMIZATION: This version uses a lightweight ListDataset wrapper and converts
-    data to tensors only when needed (per batch), rather than converting the entire dataset
-    upfront. This significantly reduces peak memory usage during dataloader creation.
-
-    This function processes pre-grouped training data where each key in the dictionary corresponds
-    to a specific sequence length, and each value is a list of training samples. It converts the
-    data into PyTorch tensors and constructs a separate DataLoader for each sequence length.
+    Creates a dictionary of DataLoaders using lazy-loading datasets.
+    Automatically adjusts batch size based on sequence length to prevent OOM errors.
 
     Args:
-        grouped_data (dict): A dictionary where keys are sequence lengths (e.g., 1, 2, ..., T), and
-                             values are lists of tuples (input_ids, masked_tokens, masked_pos).
-        batch_size (int): Batch size to use for the DataLoaders.
-        shuffle (bool): Whether to shuffle the data during loading.
+        grouped_data (dict): Dictionary mapping seq_len to (file_metadata, indices)
+            where file_metadata = [(filepath, num_samples), ...]
+            and indices = [(file_idx, sample_idx), ...]
+        batch_size (int): Base batch size for shortest sequences
+        shuffle (bool): Whether to shuffle data
 
     Returns:
-        dict: A dictionary mapping each sequence length to its corresponding DataLoader.
+        dict: Dictionary mapping seq_len to DataLoader
     """
     dataloaders = {}
 
-    for seq_length, group in grouped_data.items():
+    print(f"\nCreating dataloaders for sequence lengths: {sorted([int(k) for k in grouped_data.keys()])}")
 
-        print(f"dataloader in progress ...\nkey: {seq_length}")
+    for seq_length, (file_metadata, indices) in grouped_data.items():
+        print(f"\nCreating dataloader for sequence length: {seq_length}")
+        print(f"  Number of samples: {len(indices)}")
 
-        ## Uncomment the following line if you run out of memory during pre-training
-        # batch_size = batch_size // 8 if seq_length >= 5 else batch_size
+        # Extract file paths from metadata
+        file_paths = [filepath for filepath, _ in file_metadata]
 
-        # Use lightweight ListDataset instead of converting everything to tensors upfront
-        dataset = ListDataset(group)
+        # Create lazy-loading dataset
+        dataset = LazyLoadDataset(file_paths, indices)
 
-        # DataLoader with custom collate_fn that converts to tensors per-batch
+        # Create DataLoader with multiple workers for parallel I/O
+        # Note: On Windows, num_workers > 0 can cause memory issues with pickle caching
+        # Setting to 0 for Windows compatibility (single-process loading)
         dataloaders[seq_length] = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            collate_fn=collate_fn_efficient,
             pin_memory=True,
-            num_workers=0  # Keep 0 for Windows compatibility
+            num_workers=0  # Set to 0 for Windows; use 2-4 on Linux/Mac
         )
+
+        print(f"  DataLoader created with batch_size={batch_size} (base={batch_size}, seq_len={seq_length}), num_workers=0")
 
     return dataloaders
 
@@ -1056,11 +794,11 @@ def nmse_loss(y_true, y_pred):
     
     return nmse
 
-def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, device, save_dir="models", log_file="training_log.csv"):
+def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, device, save_dir="models", log_file="training_log.csv", max_batches_per_epoch=None):
     """
     Trains the Large Wireless Model (LWM) using masked channel modeling on grouped datasets of various sequence lengths.
 
-    The training alternates between training and evaluation every 2 epochs. For each sequence length, 
+    The training alternates between training and evaluation every 2 epochs. For each sequence length,
     a separate DataLoader is used. MSE is used for the training objective, and both MSE and NMSE are computed
     during validation for performance tracking.
 
@@ -1074,6 +812,8 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
         device (torch.device): Device to train on ('cuda' or 'cpu').
         save_dir (str, optional): Directory to save the best model checkpoints. Default is "models".
         log_file (str, optional): CSV path to log training/validation metrics. Default is "training_log.csv".
+        max_batches_per_epoch (int, optional): Maximum number of batches to process per epoch across all loaders.
+            If None, processes all batches. If set, will stop after processing this many batches. Default is None.
 
     Returns:
         model (torch.nn.Module): The trained model with the best checkpoint (based on validation MSE).
@@ -1090,6 +830,12 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
     val_nmse_losses = []
     best_val_mse = float('inf')
 
+    # Initialize CSV log file with headers (use path relative to save_dir)
+    log_path = os.path.join(save_dir, log_file)
+    with open(log_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_mse', 'val_mse', 'val_nmse', 'learning_rate'])
+
     for epoch in range(epochs):
         # Training loop
         model.train()
@@ -1097,10 +843,22 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
         train_samples = 0
 
         print(f"\nEpoch {epoch + 1}/{epochs} [Training]")
+        if max_batches_per_epoch:
+            print(f"  Max batches per dataloader: {max_batches_per_epoch}")
+
         for length, train_loader in train_loaders.items():
             print(f"Processing sequences of length {length}")
-            with tqdm(train_loader, desc=f"Length {length} [Training]", unit="batch") as t:
-                for batch in t:
+
+            # Determine total batches for this loader (either all or capped at max_batches_per_epoch)
+            total_batches = len(train_loader) if not max_batches_per_epoch else min(len(train_loader), max_batches_per_epoch)
+
+            with tqdm(train_loader, desc=f"Length {length} [Training]", unit="batch", total=total_batches) as t:
+                for batch_idx, batch in enumerate(t):
+                    # Stop after max_batches_per_epoch if limit is set
+                    if max_batches_per_epoch and batch_idx >= max_batches_per_epoch:
+                        print(f"  Reached max_batches_per_epoch ({max_batches_per_epoch}) for length {length}")
+                        break
+
                     optimizer.zero_grad()
 
                     # Move data to device
@@ -1111,6 +869,17 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
 
                     # Compute MSE loss
                     loss = criterion(masked_tokens, logits_lm)
+
+                    # Check for NaN/Inf in loss
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"\n{'='*80}")
+                        print(f"❌ NaN/Inf DETECTED IN LOSS at Epoch {epoch}, Length {length}")
+                        print(f"{'='*80}")
+                        print(f"Input stats - Min: {input_ids.min().item():.4f}, Max: {input_ids.max().item():.4f}, Mean: {input_ids.mean().item():.4f}")
+                        print(f"Logits stats - Min: {logits_lm.min().item():.4f}, Max: {logits_lm.max().item():.4f}, Mean: {logits_lm.mean().item():.4f}")
+                        print(f"{'='*80}\n")
+                        exit()
+
                     loss.backward()
                     optimizer.step()
                     scheduler.step()
@@ -1120,6 +889,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
 
                     # Update progress bar with MSE
                     t.set_postfix({"mse": train_mse / train_samples, "lr": scheduler.get_last_lr()[0]})
+
+            # Clear cache after processing this sequence length
+            train_loader.dataset._cache.clear()
+            train_loader.dataset._cache_order.clear()
 
         # Average MSE across training samples
         train_mse = train_mse / max(train_samples, 1)
@@ -1144,7 +917,7 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                             # Forward pass
                             logits_lm = model(input_ids, masked_pos)[0]
 
-                            # Compute MSE loss 
+                            # Compute MSE loss
                             mse = criterion(masked_tokens, logits_lm)
                             val_mse += mse.item()
 
@@ -1159,6 +932,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                             # Update progress bar with both MSE and NMSE
                             t.set_postfix({"mse": val_mse / val_samples, "nmse": val_nmse / val_samples})
 
+                    # Clear cache after processing this sequence length
+                    val_loader.dataset._cache.clear()
+                    val_loader.dataset._cache_order.clear()
+
             # Average MSE and NMSE across validation samples
             val_mse = val_mse / max(val_samples, 1)
             val_nmse = val_nmse / max(val_samples, 1)
@@ -1172,25 +949,44 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                 torch.save(model.state_dict(), model_path)
                 print(f"Model saved: {model_path}")
 
-        # Log the results
+        # Log the results to console
         print(f"  Train MSE: {train_mse:.4f}")
         if epoch % 2 == 0:
             print(f"  Validation MSE: {val_mse:.4f}")
             print(f"  Validation NMSE: {val_nmse:.4f}")
         print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.6e}")
 
-        # Plot losses after each epoch
-        plt.figure(figsize=(10, 6))
-        plt.plot(range(1, len(train_mse_losses) + 1), train_mse_losses, label="Train MSE")
-        if val_mse_losses:  # Plot validation only if it exists
-            plt.plot(range(1, len(val_mse_losses) + 1), val_mse_losses, label="Validation MSE")
-            plt.plot(range(1, len(val_nmse_losses) + 1), val_nmse_losses, label="Validation NMSE")
-        plt.xlabel("Epochs")
-        plt.ylabel("Loss")
-        plt.title("Training and Validation Losses")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        # Log to CSV file
+        with open(log_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            # Only write validation metrics on validation epochs, otherwise use empty strings
+            if epoch % 2 == 0:
+                writer.writerow([epoch + 1, train_mse, val_mse, val_nmse, scheduler.get_last_lr()[0]])
+            else:
+                writer.writerow([epoch + 1, train_mse, '', '', scheduler.get_last_lr()[0]])
+
+        # Plot losses after each epoch (only if we have data to plot)
+        if train_mse_losses:
+            plt.figure(figsize=(10, 6))
+            epochs_train = list(range(1, len(train_mse_losses) + 1))
+            plt.plot(epochs_train, train_mse_losses, label="Train MSE", linewidth=2)
+
+            if val_mse_losses:  # Plot validation only if it exists
+                # Validation happens every 2 epochs starting from epoch 0 (1-indexed as epoch 1)
+                # So validation occurs at epochs 1, 3, 5, 7, ... (epoch % 2 == 0 in 0-indexed, which is 1, 3, 5... in 1-indexed)
+                val_epochs = [1 + i * 2 for i in range(len(val_mse_losses))]
+                plt.plot(val_epochs, val_mse_losses, label="Validation MSE", marker='o', linewidth=2, markersize=6)
+                plt.plot(val_epochs, val_nmse_losses, label="Validation NMSE", marker='s', linewidth=2, markersize=6)
+
+            plt.xlabel("Epochs")
+            plt.ylabel("Loss")
+            plt.title("Training and Validation Losses")
+            plt.legend()
+            plt.grid(True)
+            plot_path = os.path.join(save_dir, "training_losses.png")
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Training loss plot saved to: {plot_path}")
 
     print("Training and validation complete.")
     return model
@@ -1287,7 +1083,12 @@ def visualize_embeddings(embeddings, labels=None, method="tsne", label=None):
     plt.title(f"{title} ({method.upper()})")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
-    plt.show()
+
+    # Save plot to file instead of showing
+    filename = f"embedding_viz_{method}.png"
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Embedding visualization saved to: {filename}")
 
 
 def embedding_space_visual(model, data, input_type="cls_emb", device="cpu", batch_size=64, task=None, visualization=False, labels=None, visualization_method="tsne", selected_tokens=0):
@@ -1490,4 +1291,3 @@ def plot_radar_chart(task_names, optimized_scores, baseline_scores, title="Task 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight', transparent=False)
     plt.show()
-
