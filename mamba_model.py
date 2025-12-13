@@ -3,6 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+# Import official Mamba SSM block
+try:
+    from mamba_ssm import Mamba as MambaSSM
+    MAMBA_SSM_AVAILABLE = True
+except ImportError:
+    MAMBA_SSM_AVAILABLE = False
+    MambaSSM = None
+    print("Warning: mamba_ssm not available. Install with: pip install mamba-ssm")
+
 # Use einops if available, otherwise use manual rearrange
 try:
     from einops import rearrange
@@ -64,10 +73,11 @@ class Embedding(nn.Module):
 
 class MambaBlock(nn.Module):
     """
-    Simplified Mamba block using selective state space model principles.
+    Mamba block wrapper that uses the official mamba-ssm implementation when available,
+    otherwise falls back to a custom implementation.
 
-    This implementation uses a selective mechanism to process sequences,
-    similar to the Mamba architecture but simplified for this application.
+    This wrapper maintains compatibility with the rest of the model while using
+    optimized fused kernels from the mamba-ssm package.
 
     Args:
         d_model (int): Model dimension
@@ -80,12 +90,35 @@ class MambaBlock(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.d_state = d_state
-        self.d_inner = int(expand * d_model)
         self.d_conv = d_conv
+        self.expand = expand
+        self.dropout_p = dropout
+
+        if MAMBA_SSM_AVAILABLE:
+            # Use official mamba-ssm implementation with fused kernels
+            self.mamba = MambaSSM(
+                d_model=d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand,
+            )
+            self.use_official = True
+        else:
+            # Fallback to custom implementation
+            self.use_official = False
+            self._init_custom_implementation(d_model, d_state, d_conv, expand)
+
+        # Normalization and dropout (used in both cases)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = LayerNormalization(d_model)
+        self.input_norm = LayerNormalization(d_model)
+
+    def _init_custom_implementation(self, d_model, d_state, d_conv, expand):
+        """Initialize custom Mamba implementation when official package is not available."""
+        self.d_inner = int(expand * d_model)
 
         # Input projection (produces x, z, B, C, dt for selective SSM)
         self.in_proj = nn.Linear(d_model, self.d_inner * 2)
-        # Initialize with smaller std for stability
         nn.init.normal_(self.in_proj.weight, std=0.02)
 
         # Convolution for local context
@@ -96,31 +129,24 @@ class MambaBlock(nn.Module):
             groups=self.d_inner,
             padding=d_conv - 1,
         )
-        # Initialize conv weights
         nn.init.normal_(self.conv1d.weight, std=0.02)
 
         # SSM parameters projection
-        self.x_proj = nn.Linear(self.d_inner, d_state * 2)  # For B and C
-        self.dt_proj = nn.Linear(self.d_inner, self.d_inner)  # For delta (time step)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2)
+        self.dt_proj = nn.Linear(self.d_inner, self.d_inner)
 
         # State space parameters
-        # A is initialized to be stable (negative real parts)
-        # Use a range that ensures stability: A should be negative
         A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
-        self.A_log = nn.Parameter(torch.log(A))  # Will be negative after exp
-        self.D = nn.Parameter(torch.ones(self.d_inner))  # Skip connection parameter
+        self.A_log = nn.Parameter(torch.log(A))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
 
-        # Initialize projections with smaller values for stability
+        # Initialize projections
         nn.init.normal_(self.dt_proj.weight, std=0.02)
         nn.init.normal_(self.x_proj.weight, std=0.02)
 
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model)
         nn.init.normal_(self.out_proj.weight, std=0.02)
-
-        self.dropout = nn.Dropout(dropout)
-        self.norm = LayerNormalization(d_model)
-        self.input_norm = LayerNormalization(d_model)
 
     def forward(self, x):
         """
@@ -129,102 +155,87 @@ class MambaBlock(nn.Module):
         Returns:
             output: (B, L, D)
         """
-        batch, seqlen, dim = x.shape
         residual = x
-
-        # Normalize input first for stability
         x = self.input_norm(x)
 
+        if self.use_official:
+            # Use official mamba-ssm implementation
+            output = self.mamba(x)
+        else:
+            # Use custom implementation
+            output = self._forward_custom(x)
+
+        output = self.dropout(output)
+        return self.norm(residual + output)
+
+    def _forward_custom(self, x):
+        """Custom Mamba forward pass for fallback."""
+        seqlen = x.size(1)
+
         # Input projection: split into x and z (gating)
-        xz = self.in_proj(x)  # (B, L, 2*d_inner)
-        x_in, z = xz.chunk(2, dim=-1)  # Each (B, L, d_inner)
+        xz = self.in_proj(x)
+        x_in, z = xz.chunk(2, dim=-1)
 
         # Apply 1D convolution for local context
-        # Rearrange for conv1d: (B, d_inner, L)
         x_conv = rearrange(x_in, 'b l d -> b d l')
-        x_conv = self.conv1d(x_conv)[..., :seqlen]  # Trim to original length
+        x_conv = self.conv1d(x_conv)[..., :seqlen]
         x_conv = rearrange(x_conv, 'b d l -> b l d')
         x_conv = F.silu(x_conv)
 
         # Selective SSM
-        # Project to get B and C matrices (input-dependent)
-        x_proj_out = self.x_proj(x_conv)  # (B, L, 2*d_state)
-        B, C = x_proj_out.chunk(2, dim=-1)  # Each (B, L, d_state)
+        x_proj_out = self.x_proj(x_conv)
+        B, C = x_proj_out.chunk(2, dim=-1)
 
-        # Delta (time step) - also input dependent
-        # Use softplus with clipping to avoid very large values
-        delta = self.dt_proj(x_conv)  # (B, L, d_inner)
+        # Delta (time step)
+        delta = self.dt_proj(x_conv)
         delta = F.softplus(delta)
-        # Clip delta to prevent numerical instability
-        delta = torch.clamp(delta, min=1e-4, max=10.0)  # (B, L, d_inner)
+        delta = torch.clamp(delta, min=1e-4, max=10.0)
 
-        # Get A matrix (make it negative for stability)
-        A = -torch.exp(self.A_log)  # (d_inner, d_state)
+        # Get A matrix
+        A = -torch.exp(self.A_log)
 
-        # Selective SSM scan (simplified sequential processing)
-        y = self.selective_scan(x_conv, delta, A, B, C, self.D)
+        # Selective SSM scan
+        y = self._selective_scan(x_conv, delta, A, B, C, self.D)
 
         # Gating mechanism
         y = y * F.silu(z)
 
         # Output projection
-        output = self.out_proj(y)
-        output = self.dropout(output)
+        return self.out_proj(y)
 
-        # Residual connection
-        return self.norm(residual + output)
-
-    def selective_scan(self, x, delta, A, B, C, D):
-        """
-        Numerically stable selective scan operation.
-
-        Args:
-            x: (B, L, d_inner)
-            delta: (B, L, d_inner) - time step (already clamped)
-            A: (d_inner, d_state) - state transition (negative values)
-            B: (B, L, d_state) - input matrix
-            C: (B, L, d_state) - output matrix
-            D: (d_inner,) - skip connection
-        Returns:
-            y: (B, L, d_inner)
-        """
+    def _selective_scan(self, x, delta, A, B, C, D):
+        """Numerically stable selective scan operation."""
         batch, seqlen, d_inner = x.shape
         d_state = A.shape[1]
 
         # Discretize A using delta
-        # deltaA = exp(delta * A) where A is negative (d_inner, d_state)
-        # delta is (B, L, d_inner) -> expand for broadcasting
-        # Clamp the exponent to prevent overflow
-        delta_A_exp = delta.unsqueeze(-1) * A  # (B, L, d_inner, d_state)
-        delta_A_exp = torch.clamp(delta_A_exp, min=-10.0, max=0.0)  # A is negative, so result is negative
-        deltaA = torch.exp(delta_A_exp)  # (B, L, d_inner, d_state)
+        delta_A_exp = delta.unsqueeze(-1) * A
+        delta_A_exp = torch.clamp(delta_A_exp, min=-10.0, max=0.0)
+        deltaA = torch.exp(delta_A_exp)
 
         # deltaB * x
-        # B is (B, L, d_state), x is (B, L, d_inner)
-        deltaB_x = delta.unsqueeze(-1) * B.unsqueeze(2) * x.unsqueeze(-1)  # (B, L, d_inner, d_state)
+        deltaB_x = delta.unsqueeze(-1) * B.unsqueeze(2) * x.unsqueeze(-1)
 
-        # Sequential scan through time with gradient checkpointing for stability
         # Initialize state
         h = torch.zeros(batch, d_inner, d_state, device=x.device, dtype=x.dtype)
 
         outputs = []
         for t in range(seqlen):
-            # Update state: h = deltaA * h + deltaB_x
+            # Update state
             h = deltaA[:, t] * h + deltaB_x[:, t]
 
-            # Periodically renormalize to prevent explosion (every 16 steps)
+            # Periodically renormalize
             if t % 16 == 15:
                 h_norm = torch.norm(h, dim=-1, keepdim=True)
                 h_norm = torch.clamp(h_norm, min=1e-6)
-                # Only normalize if values are getting large
                 scale = torch.where(h_norm > 10.0, 10.0 / h_norm, torch.ones_like(h_norm))
                 h = h * scale
 
-            # Output: y = C * h + D * x
-            y_t = torch.sum(C[:, t].unsqueeze(1) * h, dim=-1) + D * x[:, t]  # (B, d_inner)
+            # Output
+            y_t = torch.sum(C[:, t].unsqueeze(1) * h, dim=-1) + D * x[:, t]
             outputs.append(y_t)
 
-        y = torch.stack(outputs, dim=1)  # (B, L, d_inner)
+        y = torch.stack(outputs, dim=1)
         return y
 
 

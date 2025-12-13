@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
+import csv
 from tqdm import tqdm
 import pickle
 import deepmimo as dm
@@ -689,18 +690,9 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
 
     print(f"\nCreating dataloaders for sequence lengths: {sorted([int(k) for k in grouped_data.keys()])}")
 
-    # Define base sequence length (shortest sequence) for batch size scaling
-    min_seq_len = min([int(k) for k in grouped_data.keys()])
-
     for seq_length, (file_metadata, indices) in grouped_data.items():
         print(f"\nCreating dataloader for sequence length: {seq_length}")
         print(f"  Number of samples: {len(indices)}")
-
-        # Calculate adjusted batch size based on sequence length
-        # Memory usage scales roughly with sequence length squared (for attention)
-        # So we reduce batch size inversely proportional to sequence length
-        seq_len_int = int(seq_length)
-        adjusted_batch_size = max(16, int(batch_size * (min_seq_len / seq_len_int)))
 
         # Extract file paths from metadata
         file_paths = [filepath for filepath, _ in file_metadata]
@@ -713,13 +705,13 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
         # Setting to 0 for Windows compatibility (single-process loading)
         dataloaders[seq_length] = DataLoader(
             dataset,
-            batch_size=adjusted_batch_size,
+            batch_size=batch_size,
             shuffle=shuffle,
             pin_memory=True,
             num_workers=0  # Set to 0 for Windows; use 2-4 on Linux/Mac
         )
 
-        print(f"  DataLoader created with batch_size={adjusted_batch_size} (base={batch_size}, seq_len={seq_length}), num_workers=0")
+        print(f"  DataLoader created with batch_size={batch_size} (base={batch_size}, seq_len={seq_length}), num_workers=0")
 
     return dataloaders
 
@@ -756,7 +748,7 @@ def nmse_loss(y_true, y_pred):
     
     return nmse
 
-def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, device, save_dir="models", log_file="training_log.csv"):
+def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, device, save_dir="models", log_file="training_log.csv", max_batches_per_epoch=None):
     """
     Trains the Large Wireless Model (LWM) using masked channel modeling on grouped datasets of various sequence lengths.
 
@@ -774,6 +766,8 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
         device (torch.device): Device to train on ('cuda' or 'cpu').
         save_dir (str, optional): Directory to save the best model checkpoints. Default is "models".
         log_file (str, optional): CSV path to log training/validation metrics. Default is "training_log.csv".
+        max_batches_per_epoch (int, optional): Maximum number of batches to process per epoch across all loaders.
+            If None, processes all batches. If set, will stop after processing this many batches. Default is None.
 
     Returns:
         model (torch.nn.Module): The trained model with the best checkpoint (based on validation MSE).
@@ -790,6 +784,12 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
     val_nmse_losses = []
     best_val_mse = float('inf')
 
+    # Initialize CSV log file with headers (use path relative to save_dir)
+    log_path = os.path.join(save_dir, log_file)
+    with open(log_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['epoch', 'train_mse', 'val_mse', 'val_nmse', 'learning_rate'])
+
     for epoch in range(epochs):
         # Training loop
         model.train()
@@ -797,10 +797,22 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
         train_samples = 0
 
         print(f"\nEpoch {epoch + 1}/{epochs} [Training]")
+        if max_batches_per_epoch:
+            print(f"  Max batches per dataloader: {max_batches_per_epoch}")
+
         for length, train_loader in train_loaders.items():
             print(f"Processing sequences of length {length}")
-            with tqdm(train_loader, desc=f"Length {length} [Training]", unit="batch") as t:
-                for batch in t:
+
+            # Determine total batches for this loader (either all or capped at max_batches_per_epoch)
+            total_batches = len(train_loader) if not max_batches_per_epoch else min(len(train_loader), max_batches_per_epoch)
+
+            with tqdm(train_loader, desc=f"Length {length} [Training]", unit="batch", total=total_batches) as t:
+                for batch_idx, batch in enumerate(t):
+                    # Stop after max_batches_per_epoch if limit is set
+                    if max_batches_per_epoch and batch_idx >= max_batches_per_epoch:
+                        print(f"  Reached max_batches_per_epoch ({max_batches_per_epoch}) for length {length}")
+                        break
+
                     optimizer.zero_grad()
 
                     # Move data to device
@@ -817,21 +829,8 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                         print(f"\n{'='*80}")
                         print(f"❌ NaN/Inf DETECTED IN LOSS at Epoch {epoch}, Length {length}")
                         print(f"{'='*80}")
-                        print(f"Loss value: {loss.item()}")
                         print(f"Input stats - Min: {input_ids.min().item():.4f}, Max: {input_ids.max().item():.4f}, Mean: {input_ids.mean().item():.4f}")
                         print(f"Logits stats - Min: {logits_lm.min().item():.4f}, Max: {logits_lm.max().item():.4f}, Mean: {logits_lm.mean().item():.4f}")
-                        print(f"Masked tokens stats - Min: {masked_tokens.min().item():.4f}, Max: {masked_tokens.max().item():.4f}, Mean: {masked_tokens.mean().item():.4f}")
-                        print(f"Learning rate: {scheduler.get_last_lr()[0]}")
-                        print(f"Batch size: {input_ids.shape[0]}, Sequence length: {input_ids.shape[1]}")
-
-                        # Check for NaN in model outputs
-                        if torch.isnan(logits_lm).any():
-                            print(f"⚠ NaN found in logits_lm!")
-                        if torch.isinf(logits_lm).any():
-                            print(f"⚠ Inf found in logits_lm!")
-
-                        # Check gradients before backward
-                        print(f"\nSkipping backward pass to prevent gradient corruption.")
                         print(f"{'='*80}\n")
                         exit()
 
@@ -904,27 +903,44 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                 torch.save(model.state_dict(), model_path)
                 print(f"Model saved: {model_path}")
 
-        # Log the results
+        # Log the results to console
         print(f"  Train MSE: {train_mse:.4f}")
         if epoch % 2 == 0:
             print(f"  Validation MSE: {val_mse:.4f}")
             print(f"  Validation NMSE: {val_nmse:.4f}")
         print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.6e}")
 
-        # Plot losses after each epoch
-        plt.figure(figsize=(10, 6))
-        plt.plot(range(1, len(train_mse_losses) + 1), train_mse_losses, label="Train MSE")
-        if val_mse_losses:  # Plot validation only if it exists
-            plt.plot(range(1, len(val_mse_losses) + 1), val_mse_losses, label="Validation MSE")
-            plt.plot(range(1, len(val_nmse_losses) + 1), val_nmse_losses, label="Validation NMSE")
-        plt.xlabel("Epochs")
-        plt.ylabel("Loss")
-        plt.title("Training and Validation Losses")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig("training_losses.png", dpi=150, bbox_inches='tight')
-        plt.close()
-        print("Training loss plot saved to: training_losses.png")
+        # Log to CSV file
+        with open(log_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            # Only write validation metrics on validation epochs, otherwise use empty strings
+            if epoch % 2 == 0:
+                writer.writerow([epoch + 1, train_mse, val_mse, val_nmse, scheduler.get_last_lr()[0]])
+            else:
+                writer.writerow([epoch + 1, train_mse, '', '', scheduler.get_last_lr()[0]])
+
+        # Plot losses after each epoch (only if we have data to plot)
+        if train_mse_losses:
+            plt.figure(figsize=(10, 6))
+            epochs_train = list(range(1, len(train_mse_losses) + 1))
+            plt.plot(epochs_train, train_mse_losses, label="Train MSE", linewidth=2)
+
+            if val_mse_losses:  # Plot validation only if it exists
+                # Validation happens every 2 epochs starting from epoch 0 (1-indexed as epoch 1)
+                # So validation occurs at epochs 1, 3, 5, 7, ... (epoch % 2 == 0 in 0-indexed, which is 1, 3, 5... in 1-indexed)
+                val_epochs = [1 + i * 2 for i in range(len(val_mse_losses))]
+                plt.plot(val_epochs, val_mse_losses, label="Validation MSE", marker='o', linewidth=2, markersize=6)
+                plt.plot(val_epochs, val_nmse_losses, label="Validation NMSE", marker='s', linewidth=2, markersize=6)
+
+            plt.xlabel("Epochs")
+            plt.ylabel("Loss")
+            plt.title("Training and Validation Losses")
+            plt.legend()
+            plt.grid(True)
+            plot_path = os.path.join(save_dir, "training_losses.png")
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Training loss plot saved to: {plot_path}")
 
     print("Training and validation complete.")
     return model

@@ -725,10 +725,10 @@ def scenario_prop():
 #    - Set training epochs, batch sizes, learning rates, model dimensions, etc.
 # =============================================================================
 
-EPOCHS = 50
-BATCH_SIZE = 128
-VAL_BATCH_SIZE = 64
-WARMUP_EPOCHS = 5
+EPOCHS = 100
+BATCH_SIZE = 32
+VAL_BATCH_SIZE = 32
+WARMUP_EPOCHS = 10
 BASE_LR = 5e-4
 MIN_LR = 1e-8
 N_ROWS = 4
@@ -766,7 +766,7 @@ EXPAND = 1.2    # Expansion factor for Mamba blocks
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [17, 33]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17,33,65,129]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -1167,7 +1167,6 @@ if __name__ == "__main__":
     # 11. PRE-TRAINING LOOP
     #     - Call the train_lwm utility to run the pre-training epochs, logging metrics and saving models
     # =============================================================================
-
     pretrained_model = train_lwm(
         model,
         train_loaders,
@@ -1178,4 +1177,5 @@ if __name__ == "__main__":
         device=device,
         save_dir=save_dir,
         log_file="training_log.csv",
+        max_batches_per_epoch=1000,  # Limit each dataloader to 1000 batches per epoch
     )
