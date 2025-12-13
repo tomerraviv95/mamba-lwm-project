@@ -763,6 +763,7 @@ save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}"
 D_STATE = 8  # SSM state dimension
 D_CONV = 4    # Convolution kernel size
 EXPAND = 1.2    # Expansion factor for Mamba blocks
+BIDIRECTIONAL = True  # Use bidirectional Mamba for masked language modeling
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
@@ -1097,6 +1098,7 @@ if __name__ == "__main__":
     if MODEL_ARCHITECTURE.lower() == "mamba":
         print("=" * 80)
         print("Initializing Mamba-based LWM model")
+        print(f"Bidirectional: {BIDIRECTIONAL}")
         print("=" * 80)
         model = mamba_model.lwm_mamba(
             element_length=ELEMENT_LENGTH,
@@ -1107,6 +1109,7 @@ if __name__ == "__main__":
             d_conv=D_CONV,
             expand=EXPAND,
             dropout=DROPOUT,
+            bidirectional=BIDIRECTIONAL,
         ).to(device)
     elif MODEL_ARCHITECTURE.lower() == "transformer":
         print("=" * 80)
@@ -1137,6 +1140,8 @@ if __name__ == "__main__":
     n_parameters = count_parameters(model)
     print(f"Number of trainable parameters: {n_parameters:,}")
     print(f"Architecture: {MODEL_ARCHITECTURE}")
+    if MODEL_ARCHITECTURE.lower() == "mamba":
+        print(f"Bidirectional Mode: {BIDIRECTIONAL}")
     print("=" * 80)
 
     # =============================================================================
