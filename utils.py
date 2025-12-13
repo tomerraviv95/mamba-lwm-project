@@ -4,16 +4,19 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
+import sys
 import csv
 from tqdm import tqdm
 import pickle
+
+# Add local DeepMIMO to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DeepMIMO'))
 import deepmimo as dm
 from collections import defaultdict
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-import umap
 from math import pi
 import zipfile
 import shutil
@@ -439,19 +442,6 @@ def tokenizer_train(channels,
         normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
     
     return normalized_grouped_data 
-
-    finally:
-        # Cleanup: Only remove temp directory if tokenization completed successfully
-        # Keep the files for potential resume if there was an error
-        if os.path.exists(patches_cache_dir) and not skip_tokenization:
-            # Check if we successfully completed (no exception during tokenization)
-            try:
-                # Only cleanup if we want a clean slate next time
-                # For now, we keep the files to enable resume functionality
-                print(f"\nTokenized data saved to: {patches_cache_dir}")
-                print(f"  (Will be reused if you restart tokenization)")
-            except Exception as e:
-                print(f"\nWarning: {e}") 
 
 def tokenizer(channels,
               max_len=513, 

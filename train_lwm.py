@@ -766,7 +766,7 @@ EXPAND = 1.2    # Expansion factor for Mamba blocks
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [17,33,65,129]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -782,11 +782,11 @@ if __name__ == "__main__":
     preprocessed_data_dict = defaultdict(list)
 
     # Create cache directory for scenario data
-    cache_dir = r"C:\Users\tomer\scenarios_cache_lwm"
+    cache_dir = "/mnt/c/Users/tomer/scenarios_cache_lwm"
     os.makedirs(cache_dir, exist_ok=True)
 
     # Create directory for tokenized data organized by sequence length
-    tokenized_base_dir = r"C:\Users\tomer\tokenized_data_lwm"
+    tokenized_base_dir = "/mnt/c/Users/tomer/tokenized_data_lwm"
     os.makedirs(tokenized_base_dir, exist_ok=True)
 
     for scenario in scenarios[:-3]:

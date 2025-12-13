@@ -47,28 +47,26 @@ class LayerNormalization(nn.Module):
 
 class Embedding(nn.Module):
     """
-    Input embedding module with linear projection and positional encoding.
+    Input embedding module with linear projection (no positional encoding for Mamba).
+
+    Note: Mamba doesn't need positional encoding because its selective state-space
+    mechanism inherently captures positional information through sequential processing.
 
     Args:
         element_length (int): Length of each input element (e.g., patch size).
         d_model (int): Output embedding dimension.
-        max_len (int): Maximum sequence length for positional embeddings.
+        max_len (int): Maximum sequence length (kept for API compatibility but not used).
     """
     def __init__(self, element_length, d_model, max_len=513):
         super().__init__()
         self.element_length = element_length
         self.d_model = d_model
         self.proj = nn.Linear(element_length, d_model)
-        self.pos_embed = nn.Embedding(max_len, d_model)
         self.norm = LayerNormalization(d_model)
 
     def forward(self, x):
-        seq_len = x.size(1)
-        pos = torch.arange(seq_len, dtype=torch.long, device=x.device)
-        pos_encodings = self.pos_embed(pos)
         tok_emb = self.proj(x.float())
-        embedding = tok_emb + pos_encodings
-        return self.norm(embedding)
+        return self.norm(tok_emb)
 
 
 class MambaBlock(nn.Module):
