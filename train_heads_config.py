@@ -162,8 +162,8 @@ training_configs = [
         "epochs": 200,
         "batch_size": 128,
         "seed": 42,
-        "fine_tune_layers": None,
-        "input_type": "channel_emb",
+        "fine_tune_layers": ["layers.9", "layers.10", "layers.11"],
+        "input_type": "cls_emb",
         "selected_tokens": None
     },
     {  # Task 2
@@ -173,7 +173,7 @@ training_configs = [
         "epochs": 70,
         "batch_size": 128,
         "seed": 42,
-        "fine_tune_layers": None,
+        "fine_tune_layers": "full",
         "input_type": "mean_pooled",
         "selected_tokens": None
     },
@@ -184,7 +184,7 @@ training_configs = [
         "epochs": 100,
         "batch_size": 128,
         "seed": 42,
-        "fine_tune_layers": None,
+        "fine_tune_layers": ["layers.10", "layers.11"],
         "input_type": "channel_emb",
         "selected_tokens": None
     },
@@ -195,7 +195,7 @@ training_configs = [
         "epochs": 200,
         "batch_size": 128,
         "seed": 42,
-        "fine_tune_layers": None,
+        "fine_tune_layers": ["layers.9", "layers.10", "layers.11"],
         "input_type": "channel_emb",
         "selected_tokens": None
     },
@@ -206,7 +206,7 @@ training_configs = [
         "epochs": 150,
         "batch_size": 128,
         "seed": 42,
-        "fine_tune_layers": None,
+        "fine_tune_layers": ["layers.10", "layers.11"],
         "input_type": "mean_pooled",
         "selected_tokens": None
     }

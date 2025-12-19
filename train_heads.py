@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from typing import Optional, Tuple, List, Dict, Any
 import sys
 import warnings
+import time
 warnings.filterwarnings("ignore")
 from utils import embedding_space_visual, tokenizer, plot_radar_chart
 from pretrained_model import lwm
@@ -21,13 +22,13 @@ import train_heads_config as thc
 # MODEL SELECTION: Choose which pretrained model to use
 # ============================================================
 # Set MODEL_TYPE to either "transformer" or "mamba"
-MODEL_TYPE = "mamba"  # Options: "transformer", "mamba"
+MODEL_TYPE = "transformer"  # Options: "transformer", "mamba"
 
 # Set the checkpoint path for the selected model
 if MODEL_TYPE == "transformer":
-    PRETRAINED_CHECKPOINT_PATH = "model_checkpoint.pth"
+    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_transformer/lwm_epoch55_train42238.9593_val44108.5092.pth"
 elif MODEL_TYPE == "mamba":
-    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_mamba/model_checkpoint.pth"
+    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_mamba/lwm_epoch13_train32124.5012_val41414.2848.pth"
 else:
     raise ValueError(f"Invalid MODEL_TYPE: {MODEL_TYPE}. Must be 'transformer' or 'mamba'")
 # ============================================================
@@ -47,10 +48,10 @@ def worker_init_fn(worker_id):
 # List of TaskHeads
 task_heads = [
     thc.LosNlosClassificationHead,
-    # thc.BeamPredictionHead,
-    # thc.ChannelInterpolationHead,
-    # thc.ChannelEstimationHead,
-    # thc.ChannelChartingHead
+    thc.BeamPredictionHead,
+    thc.ChannelInterpolationHead,
+    thc.ChannelEstimationHead,
+    thc.ChannelChartingHead
 ]
 
 # Fine-tuning wrapper for LWM and downstream model
@@ -598,12 +599,93 @@ def count_parameters(model):
     """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def measure_inference_latency(
+    wrapper: nn.Module,
+    test_loader: DataLoader,
+    input_type: str = "cls_emb",
+    selected_tokens: Optional[List[int]] = None,
+    device: str = "cuda",
+    warmup_runs: int = 10,
+    measure_runs: int = 100
+) -> Dict[str, Any]:
+    """
+    Measure inference latency for a given model wrapper.
+
+    Args:
+        wrapper (nn.Module): The fine-tuned wrapper model to measure.
+        test_loader (DataLoader): DataLoader for the test dataset.
+        input_type (str): Type of input embedding to use.
+        selected_tokens (Optional[List[int]]): List of token indices if needed.
+        device (str): Device for inference ('cuda' or 'cpu').
+        warmup_runs (int): Number of warmup iterations before measurement.
+        measure_runs (int): Number of iterations to measure and average.
+
+    Returns:
+        Dict[str, Any]: Dictionary containing latency statistics in milliseconds.
+    """
+    wrapper.eval()
+
+    # Get a single batch for measurement
+    test_batch = None
+    for batch in test_loader:
+        test_batch = batch
+        break
+
+    if test_batch is None:
+        return {
+            "mean_latency_ms": None,
+            "std_latency_ms": None,
+            "min_latency_ms": None,
+            "max_latency_ms": None,
+            "median_latency_ms": None
+        }
+
+    input_data = test_batch[0].to(device)
+    batch_size = input_data.size(0)
+
+    # Warmup runs
+    with torch.no_grad():
+        for _ in range(warmup_runs):
+            _ = wrapper(input_data, input_type=input_type, selected_tokens=selected_tokens)
+
+    # Synchronize before measurement
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    # Measure latency
+    latencies = []
+    with torch.no_grad():
+        for _ in range(measure_runs):
+            if device == "cuda":
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
+
+            _ = wrapper(input_data, input_type=input_type, selected_tokens=selected_tokens)
+
+            if device == "cuda":
+                torch.cuda.synchronize()
+            end_time = time.perf_counter()
+
+            latencies.append((end_time - start_time) * 1000)  # Convert to milliseconds
+
+    latencies = np.array(latencies)
+
+    return {
+        "mean_latency_ms": float(np.mean(latencies)),
+        "std_latency_ms": float(np.std(latencies)),
+        "min_latency_ms": float(np.min(latencies)),
+        "max_latency_ms": float(np.max(latencies)),
+        "median_latency_ms": float(np.median(latencies)),
+        "batch_size": int(batch_size),
+        "per_sample_mean_latency_ms": float(np.mean(latencies) / batch_size)
+    }
+
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Process each task
 scores = []
-num_tasks = 1
+num_tasks = 5
 for t in range(1, num_tasks + 1):
     # Set random seed for reproducibility
     seed = thc.training_configs[t-1]["seed"]
@@ -615,13 +697,31 @@ for t in range(1, num_tasks + 1):
     print(f"\nLoading {MODEL_TYPE.upper()} model from {PRETRAINED_CHECKPOINT_PATH}")
 
     if MODEL_TYPE == "transformer":
-        universal_lwm = lwm().to(device)
+        universal_lwm = lwm(
+            element_length=32,
+            d_model=128,
+            n_layers=12,
+            max_len=513,
+            n_heads=8,
+            dropout=0.1
+        ).to(device)
     elif MODEL_TYPE == "mamba":
-        universal_lwm = lwm_mamba().to(device)
+        universal_lwm = lwm_mamba(
+            element_length=32,
+            d_model=128,
+            n_layers=12,
+            max_len=513,
+            d_state=8,      # Match your trained model
+            d_conv=4,       # Match your trained model
+            expand=1.2,     # Match your trained model (not 2!)
+            dropout=0.1,
+            bidirectional=True
+        ).to(device)
 
     checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
     clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
     universal_lwm.load_state_dict(clean_state_dict)
+    universal_lwm.requires_grad_(False)
     
     # Create task directory
     task_dir = f"task_{t}"
@@ -773,7 +873,58 @@ for t in range(1, num_tasks + 1):
     with open(score_path, "w") as f:
         json.dump(float(score), f, indent=7)
     print(f"Saved task score to {score_path}")
-    
+
+    # Measure inference latency
+    print(f"\nMeasuring inference latency for task {t}...")
+    latency_metrics = measure_inference_latency(
+        wrapper=wrapper,
+        test_loader=test_loader,
+        input_type=training_config["input_type"],
+        selected_tokens=training_config["selected_tokens"],
+        device=device,
+        warmup_runs=10,
+        measure_runs=100
+    )
+
+    # Collect metadata about input/output sizes
+    metadata = {
+        "task_name": task_name,
+        "model_type": MODEL_TYPE,
+        "channel_shape": {
+            "train": list(train_channels.shape),
+            "val": list(val_channels.shape) if val_channels is not None else None,
+            "test": list(test_channels.shape) if test_channels is not None else None
+        },
+        "token_shape": {
+            "train": list(train_tokens.shape),
+            "val": list(val_tokens.shape) if val_tokens is not None else None,
+            "test": list(test_tokens.shape) if test_tokens is not None else None
+        },
+        "sequence_length": int(sequence_length),
+        "d_model": int(universal_lwm.d_model),
+        "input_type": training_config["input_type"],
+        "latency_metrics": latency_metrics,
+        "model_parameters": {
+            "head_parameters": int(count_parameters(wrapper.task_head)),
+            "wrapper_parameters": int(count_parameters(wrapper))
+        }
+    }
+
+    # Save metadata
+    metadata_path = os.path.join(task_dir, "metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Saved task metadata to {metadata_path}")
+
+    # Print latency summary
+    if latency_metrics["mean_latency_ms"] is not None:
+        print(f"\nLatency Summary for Task {t}:")
+        print(f"  Mean Latency:        {latency_metrics['mean_latency_ms']:.3f} ms (batch size: {latency_metrics['batch_size']})")
+        print(f"  Per-Sample Latency:  {latency_metrics['per_sample_mean_latency_ms']:.3f} ms")
+        print(f"  Std Dev:             {latency_metrics['std_latency_ms']:.3f} ms")
+        print(f"  Min/Max:             {latency_metrics['min_latency_ms']:.3f} / {latency_metrics['max_latency_ms']:.3f} ms")
+        print(f"  Median:              {latency_metrics['median_latency_ms']:.3f} ms")
+
     scores.append(float(score))
     
 # Calculate and save composite score
