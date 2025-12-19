@@ -14,7 +14,23 @@ import warnings
 warnings.filterwarnings("ignore")
 from utils import embedding_space_visual, tokenizer, plot_radar_chart
 from pretrained_model import lwm
+from mamba_model import lwm_mamba
 import train_heads_config as thc
+
+# ============================================================
+# MODEL SELECTION: Choose which pretrained model to use
+# ============================================================
+# Set MODEL_TYPE to either "transformer" or "mamba"
+MODEL_TYPE = "mamba"  # Options: "transformer", "mamba"
+
+# Set the checkpoint path for the selected model
+if MODEL_TYPE == "transformer":
+    PRETRAINED_CHECKPOINT_PATH = "model_checkpoint.pth"
+elif MODEL_TYPE == "mamba":
+    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_mamba/model_checkpoint.pth"
+else:
+    raise ValueError(f"Invalid MODEL_TYPE: {MODEL_TYPE}. Must be 'transformer' or 'mamba'")
+# ============================================================
 
 # Set environment variable for CuBLAS deterministic behavior
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -31,10 +47,10 @@ def worker_init_fn(worker_id):
 # List of TaskHeads
 task_heads = [
     thc.LosNlosClassificationHead,
-    thc.BeamPredictionHead,
-    thc.ChannelInterpolationHead,
-    thc.ChannelEstimationHead,
-    thc.ChannelChartingHead
+    # thc.BeamPredictionHead,
+    # thc.ChannelInterpolationHead,
+    # thc.ChannelEstimationHead,
+    # thc.ChannelChartingHead
 ]
 
 # Fine-tuning wrapper for LWM and downstream model
@@ -587,7 +603,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Process each task
 scores = []
-num_tasks = 5
+num_tasks = 1
 for t in range(1, num_tasks + 1):
     # Set random seed for reproducibility
     seed = thc.training_configs[t-1]["seed"]
@@ -595,10 +611,15 @@ for t in range(1, num_tasks + 1):
     np.random.seed(seed)
     torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
     
-    # Load universal LWM
-    pretrained_checkpoint_path = "model_checkpoint.pth"
-    universal_lwm = lwm().to(device)
-    checkpoint = torch.load(pretrained_checkpoint_path, map_location=device)
+    # Load universal LWM (Transformer or Mamba based on MODEL_TYPE)
+    print(f"\nLoading {MODEL_TYPE.upper()} model from {PRETRAINED_CHECKPOINT_PATH}")
+
+    if MODEL_TYPE == "transformer":
+        universal_lwm = lwm().to(device)
+    elif MODEL_TYPE == "mamba":
+        universal_lwm = lwm_mamba().to(device)
+
+    checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
     clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
     universal_lwm.load_state_dict(clean_state_dict)
     
@@ -683,18 +704,18 @@ for t in range(1, num_tasks + 1):
         test_loader = None
     
     # Visualize embeddings before fine-tuning
-    embeddings = embedding_space_visual(
-        universal_lwm,
-        test_tokens,
-        input_type=training_config["input_type"],
-        batch_size=training_config["batch_size"],
-        selected_tokens=training_config["selected_tokens"],
-        task=training_config["task"],
-        labels=test_labels if t <= 2 or t == 5 else None,
-        visualization=True,
-        visualization_method="tsne",
-        device=device
-    )
+    # embeddings = embedding_space_visual(
+    #     universal_lwm,
+    #     test_tokens,
+    #     input_type=training_config["input_type"],
+    #     batch_size=training_config["batch_size"],
+    #     selected_tokens=training_config["selected_tokens"],
+    #     task=training_config["task"],
+    #     labels=test_labels if t <= 2 or t == 5 else None,
+    #     visualization=True,
+    #     visualization_method="tsne",
+    #     device=device
+    # )
     
     # Fine-tune the model
     wrapper, train_losses, val_losses, test_losses, score, ground_truth, predictions = finetune(
@@ -718,18 +739,18 @@ for t in range(1, num_tasks + 1):
     )
     
     # Visualize embeddings after fine-tuning
-    finetuned_embeddings = embedding_space_visual(
-        wrapper.model,
-        test_tokens,
-        input_type=training_config["input_type"],
-        batch_size=training_config["batch_size"],
-        selected_tokens=training_config["selected_tokens"],
-        task=training_config["task"],
-        labels=test_labels if t <= 2 or t == 5 else None,
-        visualization=True,
-        visualization_method="tsne",
-        device=device
-    )
+    # finetuned_embeddings = embedding_space_visual(
+    #     wrapper.model,
+    #     test_tokens,
+    #     input_type=training_config["input_type"],
+    #     batch_size=training_config["batch_size"],
+    #     selected_tokens=training_config["selected_tokens"],
+    #     task=training_config["task"],
+    #     labels=test_labels if t <= 2 or t == 5 else None,
+    #     visualization=True,
+    #     visualization_method="tsne",
+    #     device=device
+    # )
 
     # Create submission directory
     task_dir = f"submission/task_{t}"

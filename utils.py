@@ -8,6 +8,7 @@ import sys
 import csv
 from tqdm import tqdm
 import pickle
+import h5py
 
 # Add local DeepMIMO to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DeepMIMO'))
@@ -647,19 +648,20 @@ def patch_reconstructor(patches, original_rows, original_cols, patch_rows=4, pat
 
     return reconstructed
 
-class LazyLoadDataset(torch.utils.data.Dataset):
+class HDF5Dataset(torch.utils.data.Dataset):
     """
-    Lazy-loading dataset that reads samples from pickle files on-demand.
+    Efficient dataset that reads samples from HDF5 files on-demand.
+
+    HDF5 format enables direct random access without loading entire files into memory,
+    eliminating the need for LRU caching. The OS handles memory mapping automatically.
 
     Args:
-        pickle_file_paths (list): List of paths to pickle files
+        file_metadata (list): List of (filepath, group_name, num_samples) tuples
         indices (list): List of (file_idx, sample_idx) tuples indicating which samples to use
     """
-    def __init__(self, pickle_file_paths, indices):
-        self.pickle_file_paths = pickle_file_paths
+    def __init__(self, file_metadata, indices):
+        self.file_metadata = file_metadata  # [(filepath, group_name, num_samples), ...]
         self.indices = indices  # [(file_idx, sample_idx), ...]
-        self._cache = {}  # Cache loaded pickle files in memory
-        self._cache_order = []  # Track access order for LRU eviction
 
     def __len__(self):
         return len(self.indices)
@@ -667,54 +669,42 @@ class LazyLoadDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         file_idx, sample_idx = self.indices[idx]
 
-        # Load pickle file if not cached
-        if file_idx not in self._cache:
-            try:
-                with open(self.pickle_file_paths[file_idx], 'rb') as f:
-                    self._cache[file_idx] = pickle.load(f)
-                self._cache_order.append(file_idx)
-            except MemoryError:
-                # Only evict when we actually run out of memory
-                # Clear the oldest half of cached files
-                num_to_evict = max(1, len(self._cache) // 2)
-                for _ in range(num_to_evict):
-                    if self._cache_order:
-                        oldest_file_idx = self._cache_order.pop(0)
-                        del self._cache[oldest_file_idx]
+        # Get file info
+        filepath, group_name, _ = self.file_metadata[file_idx]
 
-                # Retry loading after eviction
-                with open(self.pickle_file_paths[file_idx], 'rb') as f:
-                    self._cache[file_idx] = pickle.load(f)
-                self._cache_order.append(file_idx)
-            except (EOFError, pickle.UnpicklingError) as e:
-                raise RuntimeError(
-                    f"Corrupted pickle file detected: {self.pickle_file_paths[file_idx]}\n"
-                    f"Error: {e}\n"
-                    f"Please delete this file and re-run the data generation."
-                ) from e
-        else:
-            # Move to end of LRU list (most recently used)
-            self._cache_order.remove(file_idx)
-            self._cache_order.append(file_idx)
+        # Open file and read specific sample directly (no caching needed)
+        # HDF5's chunked storage makes this efficient
+        try:
+            with h5py.File(filepath, 'r') as f:
+                group = f[group_name]
 
-        # Get the sample: [input_ids, masked_tokens, masked_pos]
-        sample = self._cache[file_idx][sample_idx]
+                # Read only the specific sample index
+                input_ids = group['input_ids'][sample_idx]
+                masked_tokens = group['masked_tokens'][sample_idx]
+                masked_pos = group['masked_pos'][sample_idx]
 
-        # Convert to tensors
-        input_ids = torch.tensor(sample[0], dtype=torch.float32)
-        masked_tokens = torch.tensor(sample[1], dtype=torch.float32)
-        masked_pos = torch.tensor(sample[2], dtype=torch.long)
+            # Convert to tensors
+            input_ids = torch.tensor(input_ids, dtype=torch.float32)
+            masked_tokens = torch.tensor(masked_tokens, dtype=torch.float32)
+            masked_pos = torch.tensor(masked_pos, dtype=torch.long)
 
-        return input_ids, masked_tokens, masked_pos
+            return input_ids, masked_tokens, masked_pos
+
+        except (OSError, KeyError) as e:
+            raise RuntimeError(
+                f"Error reading HDF5 file: {filepath}\n"
+                f"Group: {group_name}, Sample index: {sample_idx}\n"
+                f"Error: {e}\n"
+                f"Please check the file integrity."
+            ) from e
 
 def create_train_dataloader(grouped_data, batch_size, shuffle):
     """
-    Creates a dictionary of DataLoaders using lazy-loading datasets.
-    Automatically adjusts batch size based on sequence length to prevent OOM errors.
+    Creates a dictionary of DataLoaders using HDF5-based datasets.
 
     Args:
         grouped_data (dict): Dictionary mapping seq_len to (file_metadata, indices)
-            where file_metadata = [(filepath, num_samples), ...]
+            where file_metadata = [(filepath, group_name, num_samples), ...]
             and indices = [(file_idx, sample_idx), ...]
         batch_size (int): Base batch size for shortest sequences
         shuffle (bool): Whether to shuffle data
@@ -729,25 +719,23 @@ def create_train_dataloader(grouped_data, batch_size, shuffle):
     for seq_length, (file_metadata, indices) in grouped_data.items():
         print(f"\nCreating dataloader for sequence length: {seq_length}")
         print(f"  Number of samples: {len(indices)}")
+        print(f"  Number of HDF5 files: {len(file_metadata)}")
 
-        # Extract file paths from metadata
-        file_paths = [filepath for filepath, _ in file_metadata]
+        # Create HDF5 dataset (no need to extract file paths - pass full metadata)
+        dataset = HDF5Dataset(file_metadata, indices)
 
-        # Create lazy-loading dataset
-        dataset = LazyLoadDataset(file_paths, indices)
-
-        # Create DataLoader with multiple workers for parallel I/O
-        # Note: On Windows, num_workers > 0 can cause memory issues with pickle caching
-        # Setting to 0 for Windows compatibility (single-process loading)
+        # Create DataLoader
+        # Note: num_workers=0 for h5py compatibility (h5py file handles don't pickle well)
+        # HDF5's efficient chunked access and OS-level memory mapping make single-process loading fast
         dataloaders[seq_length] = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            pin_memory=True,
-            num_workers=0  # Set to 0 for Windows; use 2-4 on Linux/Mac
+            pin_memory=False,
+            num_workers=0  # h5py works best with single process
         )
 
-        print(f"  DataLoader created with batch_size={batch_size} (base={batch_size}, seq_len={seq_length}), num_workers=0")
+        print(f"  DataLoader created with batch_size={batch_size}, num_workers=0")
 
     return dataloaders
 
@@ -880,10 +868,6 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                     # Update progress bar with MSE
                     t.set_postfix({"mse": train_mse / train_samples, "lr": scheduler.get_last_lr()[0]})
 
-            # Clear cache after processing this sequence length
-            train_loader.dataset._cache.clear()
-            train_loader.dataset._cache_order.clear()
-
         # Average MSE across training samples
         train_mse = train_mse / max(train_samples, 1)
         train_mse_losses.append(train_mse)
@@ -921,10 +905,6 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
 
                             # Update progress bar with both MSE and NMSE
                             t.set_postfix({"mse": val_mse / val_samples, "nmse": val_nmse / val_samples})
-
-                    # Clear cache after processing this sequence length
-                    val_loader.dataset._cache.clear()
-                    val_loader.dataset._cache_order.clear()
 
             # Average MSE and NMSE across validation samples
             val_mse = val_mse / max(val_samples, 1)

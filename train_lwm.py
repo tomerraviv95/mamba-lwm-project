@@ -14,6 +14,7 @@ import random
 import warnings
 from collections import defaultdict
 
+import h5py
 import numpy as np
 import torch
 import torch.nn as nn
@@ -33,6 +34,86 @@ from utils import (
 )
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+# =============================================================================
+# 1.5. HDF5 HELPER FUNCTIONS
+#     - Functions to save and load tokenized data in HDF5 format
+# =============================================================================
+def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, chunk_size=32):
+    """
+    Save tokenized data to HDF5 file with optimal chunking for random access.
+
+    Args:
+        hdf5_path (str): Path to HDF5 file
+        tokenized_data_list (list): List of [input_ids, masked_tokens, masked_pos] samples
+        seq_length (int): Sequence length for this group
+        chunk_size (int): Number of samples per chunk (default: 32)
+    """
+    num_samples = len(tokenized_data_list)
+    if num_samples == 0:
+        return
+
+    # Convert first sample to numpy to get shapes
+    sample = tokenized_data_list[0]
+    input_ids_np = np.array(sample[0], dtype=np.float32)
+    masked_tokens_np = np.array(sample[1], dtype=np.float32)
+    masked_pos_np = np.array(sample[2], dtype=np.int32)
+
+    input_ids_shape = input_ids_np.shape
+    masked_tokens_shape = masked_tokens_np.shape
+    masked_pos_shape = masked_pos_np.shape
+
+    # Prepare arrays - convert all samples to numpy
+    input_ids_array = np.array([np.array(s[0], dtype=np.float32) for s in tokenized_data_list], dtype=np.float32)
+    masked_tokens_array = np.array([np.array(s[1], dtype=np.float32) for s in tokenized_data_list], dtype=np.float32)
+    masked_pos_array = np.array([np.array(s[2], dtype=np.int32) for s in tokenized_data_list], dtype=np.int32)
+
+    # Create or append to HDF5 file
+    with h5py.File(hdf5_path, 'a') as f:
+        # Create group for this sequence length
+        group_name = f'length_{seq_length}'
+
+        if group_name in f:
+            # Group already exists, remove it to overwrite
+            del f[group_name]
+
+        group = f.create_group(group_name)
+
+        # Create datasets with chunking and compression
+        group.create_dataset(
+            'input_ids',
+            data=input_ids_array,
+            chunks=(min(chunk_size, num_samples), *input_ids_shape),
+            compression='gzip',
+            compression_opts=4,
+            dtype=np.float32
+        )
+
+        group.create_dataset(
+            'masked_tokens',
+            data=masked_tokens_array,
+            chunks=(min(chunk_size, num_samples), *masked_tokens_shape),
+            compression='gzip',
+            compression_opts=4,
+            dtype=np.float32
+        )
+
+        group.create_dataset(
+            'masked_pos',
+            data=masked_pos_array,
+            chunks=(min(chunk_size, num_samples), *masked_pos_shape),
+            compression='gzip',
+            compression_opts=4,
+            dtype=np.int32
+        )
+
+        # Store metadata
+        group.attrs['num_samples'] = num_samples
+        group.attrs['seq_length'] = seq_length
+        group.attrs['input_ids_shape'] = input_ids_shape
+        group.attrs['masked_tokens_shape'] = masked_tokens_shape
+        group.attrs['masked_pos_shape'] = masked_pos_shape
 
 
 # =============================================================================
@@ -756,7 +837,7 @@ task = [
 ][-1]
 
 # Model architecture selection: "transformer" or "mamba"
-MODEL_ARCHITECTURE = "mamba"  # Change to "mamba" to use Mamba-based architecture
+MODEL_ARCHITECTURE = "transformer"  # Change to "mamba" to use Mamba-based architecture
 save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}"
 
 # Mamba-specific hyperparameters (only used if MODEL_ARCHITECTURE == "mamba")
@@ -767,7 +848,7 @@ BIDIRECTIONAL = True  # Use bidirectional Mamba for masked language modeling
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [17]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17, 33, 65, 129, 257]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -826,19 +907,11 @@ if __name__ == "__main__":
                 print(f"\nSkipping scenario: {scenario}, BS #{bs_idx} (no valid channels)")
                 continue
 
-            # Check if tokenized data already exists by searching all sequence length directories
-            pkl_filename_pattern = f"{scenario}_bs{bs_idx}.pkl"
-            tokenized_files_exist = False
-            if os.path.exists(tokenized_base_dir):
-                for seq_len_dir in os.listdir(tokenized_base_dir):
-                    seq_len_path = os.path.join(tokenized_base_dir, seq_len_dir)
-                    if os.path.isdir(seq_len_path):
-                        pkl_filepath = os.path.join(seq_len_path, pkl_filename_pattern)
-                        if os.path.exists(pkl_filepath):
-                            tokenized_files_exist = True
-                            break
+            # Check if tokenized HDF5 file already exists
+            hdf5_filename = f"{scenario}_bs{bs_idx}.h5"
+            hdf5_filepath = os.path.join(tokenized_base_dir, hdf5_filename)
 
-            if tokenized_files_exist:
+            if os.path.exists(hdf5_filepath):
                 print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, skipping tokenization")
                 continue
 
@@ -852,20 +925,16 @@ if __name__ == "__main__":
                 seed=42,
             )
 
-            # Save tokenized data to pickle files organized by sequence length
-            for key, value in scenario_preprocessed_dict.items():
-                # Create subdirectory for this sequence length (key)
-                seq_len_dir = os.path.join(tokenized_base_dir, str(key))
-                os.makedirs(seq_len_dir, exist_ok=True)
-
-                # Create pickle filename based on scenario and bs_idx
-                pkl_filename = f"{scenario}_bs{bs_idx}.pkl"
-                pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
-
-                # Save to pickle
-                print(f"Saving tokenized data to: {pkl_filepath}")
-                with open(pkl_filepath, "wb") as f:
-                    pickle.dump(value, f, protocol=5)
+            # Save tokenized data to HDF5 file (one file per scenario+bs, with groups by sequence length)
+            print(f"Saving tokenized data to: {hdf5_filepath}")
+            for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
+                save_tokenized_to_hdf5(
+                    hdf5_filepath,
+                    tokenized_samples,
+                    seq_length=int(seq_length),
+                    chunk_size=32
+                )
+                print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
 
             labels.extend(scenario_labels)
 
@@ -924,19 +993,11 @@ if __name__ == "__main__":
                     print(f"\nSkipping scenario: {scenario}, BS #{bs_idx}, Zone {zone} (no valid channels)")
                     continue
 
-                # Check if tokenized data already exists by searching all sequence length directories
-                pkl_filename_pattern = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
-                tokenized_files_exist = False
-                if os.path.exists(tokenized_base_dir):
-                    for seq_len_dir in os.listdir(tokenized_base_dir):
-                        seq_len_path = os.path.join(tokenized_base_dir, seq_len_dir)
-                        if os.path.isdir(seq_len_path):
-                            pkl_filepath = os.path.join(seq_len_path, pkl_filename_pattern)
-                            if os.path.exists(pkl_filepath):
-                                tokenized_files_exist = True
-                                break
+                # Check if tokenized HDF5 file already exists
+                hdf5_filename = f"{scenario}_bs{bs_idx}_zone{zone}.h5"
+                hdf5_filepath = os.path.join(tokenized_base_dir, hdf5_filename)
 
-                if tokenized_files_exist:
+                if os.path.exists(hdf5_filepath):
                     print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, Zone {zone}, skipping tokenization")
                     continue
 
@@ -950,20 +1011,16 @@ if __name__ == "__main__":
                     seed=42,
                 )
 
-                # Save tokenized data to pickle files organized by sequence length
-                for key, value in scenario_preprocessed_dict.items():
-                    # Create subdirectory for this sequence length (key)
-                    seq_len_dir = os.path.join(tokenized_base_dir, str(key))
-                    os.makedirs(seq_len_dir, exist_ok=True)
-
-                    # Create pickle filename based on scenario, bs_idx, and zone
-                    pkl_filename = f"{scenario}_bs{bs_idx}_zone{zone}.pkl"
-                    pkl_filepath = os.path.join(seq_len_dir, pkl_filename)
-
-                    # Save to pickle
-                    print(f"Saving tokenized data to: {pkl_filepath}")
-                    with open(pkl_filepath, "wb") as f:
-                        pickle.dump(value, f, protocol=5)
+                # Save tokenized data to HDF5 file (one file per scenario+bs+zone, with groups by sequence length)
+                print(f"Saving tokenized data to: {hdf5_filepath}")
+                for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
+                    save_tokenized_to_hdf5(
+                        hdf5_filepath,
+                        tokenized_samples,
+                        seq_length=int(seq_length),
+                        chunk_size=32
+                    )
+                    print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
 
                 labels.extend(scenario_labels)
 
@@ -980,44 +1037,42 @@ if __name__ == "__main__":
         print("\nUsing all sequence lengths")
         filter_keys = None
 
-    file_metadata = defaultdict(list)  # {seq_len: [(filepath, num_samples), ...]}
+    file_metadata = defaultdict(list)  # {seq_len: [(filepath, group_name, num_samples), ...]}
 
-    # Iterate through sequence length subdirectories
-    for seq_len_key in os.listdir(tokenized_base_dir):
-        seq_len_dir = os.path.join(tokenized_base_dir, seq_len_key)
+    # Iterate through all HDF5 files in tokenized_base_dir
+    for filename in os.listdir(tokenized_base_dir):
+        if filename.endswith(".h5"):
+            hdf5_filepath = os.path.join(tokenized_base_dir, filename)
 
-        if os.path.isdir(seq_len_dir):
-            # Skip if filtering is enabled and this sequence length is not in the filter
-            if filter_keys and seq_len_key not in filter_keys:
-                print(f"\nSkipping sequence length: {seq_len_key} (not in filter)")
-                continue
+            print(f"\nProcessing HDF5 file: {filename}")
 
-            print(f"\nProcessing sequence length: {seq_len_key}")
+            try:
+                with h5py.File(hdf5_filepath, 'r') as f:
+                    # Iterate through all groups (sequence lengths) in this file
+                    for group_name in f.keys():
+                        if group_name.startswith('length_'):
+                            seq_len_key = group_name.replace('length_', '')
 
-            # Iterate through all pickle files in this subdirectory
-            for pkl_file in os.listdir(seq_len_dir):
-                if pkl_file.endswith(".pkl"):
-                    pkl_filepath = os.path.join(seq_len_dir, pkl_file)
+                            # Skip if filtering is enabled and this sequence length is not in the filter
+                            if filter_keys and seq_len_key not in filter_keys:
+                                continue
 
-                    # Load just to get sample count, then discard
-                    try:
-                        with open(pkl_filepath, "rb") as f:
-                            data_list = pickle.load(f)
-                            num_samples = len(data_list)
+                            group = f[group_name]
+                            num_samples = group.attrs['num_samples']
 
-                        file_metadata[seq_len_key].append((pkl_filepath, num_samples))
-                        print(f"  Found: {pkl_file} with {num_samples} samples")
+                            # Store: (filepath, group_name, num_samples)
+                            file_metadata[seq_len_key].append((hdf5_filepath, group_name, num_samples))
+                            print(f"  Found group '{group_name}' with {num_samples} samples")
 
-                        del data_list  # Free memory immediately
-                    except (EOFError, pickle.UnpicklingError) as e:
-                        print(f"  WARNING: Corrupted pickle file detected: {pkl_file}")
-                        print(f"  Error: {e}")
-                        print(f"  Deleting corrupted file: {pkl_filepath}")
-                        os.remove(pkl_filepath)
-                        print("  Please re-run to regenerate this file.")
+            except (OSError, KeyError) as e:
+                print(f"  WARNING: Error reading HDF5 file: {filename}")
+                print(f"  Error: {e}")
+                print(f"  Skipping this file.")
 
-            total_samples = sum(count for _, count in file_metadata[seq_len_key])
-            print(f"  Total samples for sequence length {seq_len_key}: {total_samples}")
+    # Print summary
+    for seq_len_key in sorted(file_metadata.keys(), key=int):
+        total_samples = sum(count for _, _, count in file_metadata[seq_len_key])
+        print(f"\nSequence length {seq_len_key}: {total_samples} total samples from {len(file_metadata[seq_len_key])} file(s)")
 
     print("\n" + "=" * 80)
     print(f"Total sequence length keys: {len(file_metadata)}")
@@ -1045,7 +1100,7 @@ if __name__ == "__main__":
 
         # Build global indices: list of (file_idx, sample_idx_within_file)
         indices = []
-        for file_idx, (filepath, num_samples) in enumerate(file_metadata[key]):
+        for file_idx, (filepath, group_name, num_samples) in enumerate(file_metadata[key]):
             for sample_idx in range(num_samples):
                 indices.append((file_idx, sample_idx))
 
