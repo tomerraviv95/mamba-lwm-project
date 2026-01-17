@@ -1,7 +1,7 @@
 """
 Latency Benchmark Script: Mamba vs Transformer
 
-Measures inference latency as a function of sequence length for both architectures
+Measures inference latency as a function of channel matrix size for both architectures
 using synthetic Gaussian noise data.
 """
 
@@ -9,6 +9,7 @@ import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import time
 from typing import Dict, List
 from tqdm import tqdm
@@ -17,7 +18,7 @@ warnings.filterwarnings("ignore")
 
 from pretrained_model import lwm
 from mamba_model import lwm_mamba
-from utils import tokenizer
+from utils import patch_maker
 
 # Set deterministic behavior
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -39,12 +40,12 @@ D_CONV = 4
 EXPAND = 1.2
 
 # Benchmark settings
-BATCH_SIZE = 32
-TARGET_SEQUENCE_LENGTHS = [16, 32, 64, 128, 256]  # Desired sequence lengths
+BATCH_SIZE = 4  # Small batch size to avoid OOM
+MATRIX_SIZES = [16, 32, 64, 128, 256]  # Channel matrix dimensions (n_rows = n_cols)
 WARMUP_RUNS = 10
-MEASURE_RUNS = 100
+MEASURE_RUNS = 100  # Number of batches to average over
 
-# Patch parameters
+# Patch parameters (from train_lwm.py)
 PATCH_ROWS = 4
 PATCH_COLS = 4
 
@@ -57,27 +58,7 @@ def set_seed(seed: int = 42):
         torch.cuda.manual_seed_all(seed)
 
 
-def calculate_matrix_size(target_seq_len: int, patch_rows: int = PATCH_ROWS, patch_cols: int = PATCH_COLS):
-    """
-    Calculate matrix dimensions to achieve a target sequence length.
-
-    Sequence length = n_patches + 1 (CLS token)
-    n_patches = (n_rows / patch_rows) * (n_cols / patch_cols)
-
-    For square matrices: n_rows = n_cols = sqrt(n_patches) * patch_size
-    """
-    n_patches = target_seq_len - 1  # Subtract 1 for CLS token
-
-    # For square matrices, patches_per_side^2 = n_patches
-    patches_per_side = int(np.sqrt(n_patches))
-
-    # Calculate matrix dimension
-    matrix_dim = patches_per_side * patch_rows
-
-    return matrix_dim, matrix_dim
-
-
-def generate_synthetic_channels(batch_size: int, n_rows: int, n_cols: int) -> torch.Tensor:
+def generate_synthetic_channels(batch_size: int, n_rows: int, n_cols: int) -> np.ndarray:
     """Generate synthetic channel data using Gaussian noise.
 
     Args:
@@ -86,45 +67,106 @@ def generate_synthetic_channels(batch_size: int, n_rows: int, n_cols: int) -> to
         n_cols: Number of columns in the channel matrix
 
     Returns:
-        Complex-valued tensor of shape (batch_size, n_rows, n_cols).
+        Complex-valued numpy array of shape (batch_size, n_rows, n_cols).
     """
     # Generate real and imaginary parts
-    real_part = torch.randn(batch_size, n_rows, n_cols)
-    imag_part = torch.randn(batch_size, n_rows, n_cols)
+    real_part = np.random.randn(batch_size, n_rows, n_cols)
+    imag_part = np.random.randn(batch_size, n_rows, n_cols)
 
-    # Create complex tensor
-    return torch.complex(real_part, imag_part)
+    # Create complex array
+    return real_part + 1j * imag_part
+
+
+def tokenize_channels(channels: np.ndarray) -> torch.Tensor:
+    """
+    Tokenize channel matrices into patches following train_lwm.py processing.
+
+    Args:
+        channels: Complex numpy array of shape (batch_size, n_rows, n_cols)
+
+    Returns:
+        Torch tensor of tokenized patches with shape (batch_size, n_patches, patch_dim)
+    """
+    # Use patch_maker from utils (same as train_lwm.py)
+    patches = patch_maker(channels, patch_rows=PATCH_ROWS, patch_cols=PATCH_COLS)
+
+    # Add CLS token
+    batch_size = patches.shape[0]
+    patch_size = patches.shape[2]
+
+    # Create CLS token (0.2 * ones, same as in utils.py tokenizer)
+    cls_token = np.ones((batch_size, 1, patch_size)) * 0.2
+
+    # Concatenate CLS token with patches
+    tokens_with_cls = np.concatenate([cls_token, patches], axis=1)
+
+    # Convert to torch tensor
+    return torch.from_numpy(tokens_with_cls).float()
 
 
 def measure_latency(
     model: torch.nn.Module,
-    input_tensor: torch.Tensor,
+    channels: np.ndarray,
     warmup_runs: int = WARMUP_RUNS,
     measure_runs: int = MEASURE_RUNS
 ) -> Dict[str, float]:
-    """Measure inference latency with proper GPU synchronization."""
+    """Measure inference latency with proper GPU synchronization.
+
+    Args:
+        model: Model to benchmark
+        channels: Complex channel data to generate tokens from
+        warmup_runs: Number of warmup iterations
+        measure_runs: Number of measurement batches
+
+    Returns:
+        Dictionary with latency statistics
+    """
     model.eval()
-    input_tensor = input_tensor.to(DEVICE)
+
+    # Generate warmup tokens
+    warmup_tokens = tokenize_channels(channels[:BATCH_SIZE]).to(DEVICE)
 
     # Warmup
     with torch.no_grad():
         for _ in range(warmup_runs):
-            _ = model(input_tensor)
+            _ = model(warmup_tokens)
 
     if DEVICE.type == "cuda":
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
-    # Measure
+    del warmup_tokens
+
+    # Measure across multiple batches
     latencies = []
     with torch.no_grad():
-        for _ in range(measure_runs):
+        for i in range(measure_runs):
+            # Generate fresh tokens for each batch to avoid memory buildup
+            batch_start = (i * BATCH_SIZE) % len(channels)
+            batch_end = batch_start + BATCH_SIZE
+            if batch_end > len(channels):
+                # Wrap around if needed
+                batch_channels = np.concatenate([
+                    channels[batch_start:],
+                    channels[:batch_end - len(channels)]
+                ])
+            else:
+                batch_channels = channels[batch_start:batch_end]
+
+            tokens = tokenize_channels(batch_channels).to(DEVICE)
+
             if DEVICE.type == "cuda":
                 torch.cuda.synchronize()
             start = time.perf_counter()
-            _ = model(input_tensor)
+            _ = model(tokens)
             if DEVICE.type == "cuda":
                 torch.cuda.synchronize()
             latencies.append((time.perf_counter() - start) * 1000)
+
+            # Clean up
+            del tokens
+            if DEVICE.type == "cuda":
+                torch.cuda.empty_cache()
 
     return {
         "mean": float(np.mean(latencies)),
@@ -132,12 +174,12 @@ def measure_latency(
     }
 
 
-def benchmark_model(model_type: str, target_sequence_lengths: List[int]) -> List[Dict]:
-    """Benchmark a model across different sequence lengths.
+def benchmark_model(model_type: str, matrix_sizes: List[int]) -> List[Dict]:
+    """Benchmark a model across different channel matrix sizes.
 
     Args:
         model_type: Either 'transformer' or 'mamba'
-        target_sequence_lengths: List of desired sequence lengths
+        matrix_sizes: List of matrix dimensions (n_rows = n_cols)
 
     Returns:
         List of dictionaries containing benchmark results
@@ -145,12 +187,23 @@ def benchmark_model(model_type: str, target_sequence_lengths: List[int]) -> List
     results = []
 
     print(f"\nBenchmarking {model_type.upper()}...")
-    for target_seq_len in tqdm(target_sequence_lengths, desc=f"{model_type.upper()}"):
-        # Calculate matrix dimensions for the target sequence length
-        n_rows, n_cols = calculate_matrix_size(target_seq_len)
+    for matrix_size in tqdm(matrix_sizes, desc=f"{model_type.upper()}"):
+        n_rows = n_cols = matrix_size
 
-        # Calculate what the actual max_len will be
-        max_len = target_seq_len + 10  # Add some buffer
+        # Pre-generate channels for all batches (tokenization happens per batch during measurement)
+        # Generate enough samples for all measurement runs
+        total_samples = BATCH_SIZE * MEASURE_RUNS
+        print(f"\n  Generating {matrix_size}x{matrix_size} matrices for {MEASURE_RUNS} batches...")
+        channels = generate_synthetic_channels(total_samples, n_rows, n_cols)
+
+        # Get sequence length from a sample tokenization
+        sample_tokens = tokenize_channels(channels[:BATCH_SIZE])
+        actual_seq_len = sample_tokens.shape[1]
+        n_patches = actual_seq_len - 1  # Exclude CLS token
+        del sample_tokens
+
+        # Calculate max_len for model
+        max_len = actual_seq_len + 10  # Add buffer
 
         # Initialize model
         if model_type == "transformer":
@@ -177,31 +230,27 @@ def benchmark_model(model_type: str, target_sequence_lengths: List[int]) -> List
 
         model.eval()
 
-        # Generate synthetic data and tokenize
-        channels = generate_synthetic_channels(BATCH_SIZE, n_rows, n_cols)
-        tokens = tokenizer(channels)
-        actual_seq_len = tokens.shape[1]
-
-        # Measure latency
+        # Measure ONLY model inference latency (not tokenization)
         try:
-            latency = measure_latency(model, tokens)
+            latency = measure_latency(model, channels)
             results.append({
-                "target_sequence_length": target_seq_len,
-                "actual_sequence_length": actual_seq_len,
-                "matrix_size": (n_rows, n_cols),
+                "matrix_size": matrix_size,
+                "sequence_length": actual_seq_len,
+                "n_patches": n_patches,
                 "mean_latency": latency["mean"],
                 "std_latency": latency["std"]
             })
 
-            print(f"  Target seq_len={target_seq_len:3d}, Actual={actual_seq_len:3d}, "
-                  f"Matrix={n_rows}x{n_cols}, Latency={latency['mean']:.2f}ms")
+            print(f"  Matrix={matrix_size}x{matrix_size}, Seq_len={actual_seq_len}, "
+                  f"Patches={n_patches}, Latency={latency['mean']:.2f}±{latency['std']:.2f}ms (batch_size={BATCH_SIZE})")
 
         except RuntimeError as e:
-            print(f"\nFailed at target_seq_len={target_seq_len}: {str(e)}")
+            print(f"\nFailed at matrix_size={matrix_size}: {str(e)}")
 
         # Cleanup
-        del model
-        torch.cuda.empty_cache()
+        del model, channels
+        if DEVICE.type == "cuda":
+            torch.cuda.empty_cache()
 
     return results
 
@@ -209,58 +258,60 @@ def benchmark_model(model_type: str, target_sequence_lengths: List[int]) -> List
 def plot_results(transformer_results: List[Dict], mamba_results: List[Dict]):
     """Create publication-quality plot comparing latencies."""
 
-    # Extract data
-    trans_seq = [r["actual_sequence_length"] for r in transformer_results]
-    trans_mean = [r["mean_latency"] for r in transformer_results]
-    trans_std = [r["std_latency"] for r in transformer_results]
+    # Extract data and convert from ms to seconds
+    trans_sizes = [r["matrix_size"] for r in transformer_results]
+    trans_mean = [r["mean_latency"] / 1000.0 for r in transformer_results]  # Convert to seconds
 
-    mamba_seq = [r["actual_sequence_length"] for r in mamba_results]
-    mamba_mean = [r["mean_latency"] for r in mamba_results]
-    mamba_std = [r["std_latency"] for r in mamba_results]
+    mamba_sizes = [r["matrix_size"] for r in mamba_results]
+    mamba_mean = [r["mean_latency"] / 1000.0 for r in mamba_results]  # Convert to seconds
 
-    # Create figure with high quality settings
-    plt.figure(figsize=(12, 7))
-    plt.style.use('seaborn-v0_8-darkgrid')
+    # Set seaborn style
+    sns.set_style("white")
+    sns.set_context("paper", font_scale=1.5)
 
-    # Plot with error bars
-    plt.errorbar(trans_seq, trans_mean, yerr=trans_std,
-                 marker='o', markersize=10, linewidth=2.5, capsize=6,
-                 label='Transformer', color='#2E86AB', alpha=0.9,
-                 markerfacecolor='white', markeredgewidth=2)
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    plt.errorbar(mamba_seq, mamba_mean, yerr=mamba_std,
-                 marker='s', markersize=10, linewidth=2.5, capsize=6,
-                 label='Mamba', color='#A23B72', alpha=0.9,
-                 markerfacecolor='white', markeredgewidth=2)
+    # Plot smooth curves
+    ax.plot(trans_sizes, trans_mean,
+            marker='o', markersize=8, linewidth=3,
+            label='Transformer', color='#3498db',
+            linestyle='-', markeredgewidth=0, alpha=0.85)
+
+    ax.plot(mamba_sizes, mamba_mean,
+            marker='s', markersize=8, linewidth=3,
+            label='Mamba', color='#e74c3c',
+            linestyle='-', markeredgewidth=0, alpha=0.85)
 
     # Styling
-    plt.xlabel('Sequence Length', fontsize=16, fontweight='bold')
-    plt.ylabel('Inference Latency (ms)', fontsize=16, fontweight='bold')
-    plt.title('Inference Latency: Mamba vs Transformer\n(Batch Size = {})'.format(BATCH_SIZE),
-              fontsize=18, fontweight='bold', pad=20)
+    ax.set_xlabel('Channel Matrix Size (N × N)', fontsize=18, fontweight='600')
+    ax.set_ylabel('Inference Latency (s)', fontsize=18, fontweight='600')
+    ax.set_title('Inference Latency',
+                 fontsize=20, fontweight='700', pad=20)
 
-    plt.legend(fontsize=14, frameon=True, shadow=True, fancybox=True,
-               loc='upper left', framealpha=0.95)
+    # Set x-ticks to exact matrix sizes
+    ax.set_xticks(trans_sizes)
+    ax.set_xticklabels([f'{size}' for size in trans_sizes])
 
-    plt.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
-    plt.tick_params(labelsize=12)
+    # Legend
+    ax.legend(fontsize=16, frameon=True, fancybox=True,
+              shadow=True, loc='upper left', framealpha=0.9)
 
-    # Add speedup annotations
-    for i in range(min(len(trans_seq), len(mamba_seq))):
-        if trans_seq[i] == mamba_seq[i]:
-            speedup = trans_mean[i] / mamba_mean[i]
-            mid_y = (trans_mean[i] + mamba_mean[i]) / 2
-            plt.annotate(f'{speedup:.2f}x',
-                        xy=(trans_seq[i], mid_y),
-                        xytext=(10, 0), textcoords='offset points',
-                        fontsize=10, color='#27613A', fontweight='bold',
-                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+    # Grid
+    ax.grid(True, alpha=0.25, linestyle='--', linewidth=1)
+    ax.set_axisbelow(True)
+
+    # Tick styling
+    ax.tick_params(labelsize=14)
+
+    # Remove top and right spines
+    sns.despine()
 
     plt.tight_layout()
 
     # Save with high DPI
     output_file = 'latency_comparison.png'
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"\nPlot saved to: {output_file}")
 
     plt.show()
@@ -270,44 +321,52 @@ def main():
     """Main execution."""
     set_seed(SEED)
 
-    print("=" * 70)
+    print("=" * 80)
     print("LATENCY BENCHMARK: Mamba vs Transformer")
-    print("=" * 70)
+    print("=" * 80)
     print(f"Device: {DEVICE}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Sequence Lengths: {SEQUENCE_LENGTHS}")
+    print(f"Batch Size: {BATCH_SIZE} samples per batch")
+    print(f"Measurement: Average over {MEASURE_RUNS} batches")
+    print(f"Channel Matrix Sizes: {MATRIX_SIZES}")
     print(f"Model: d_model={D_MODEL}, n_layers={N_LAYERS}")
-    print("=" * 70)
+    print(f"Patch Size: {PATCH_ROWS}x{PATCH_COLS}")
+    print(f"Note: Measuring ONLY model inference latency (tokenization excluded)")
+    print("=" * 80)
 
     # Run benchmarks
-    transformer_results = benchmark_model("transformer", SEQUENCE_LENGTHS)
-    mamba_results = benchmark_model("mamba", SEQUENCE_LENGTHS)
+    transformer_results = benchmark_model("transformer", MATRIX_SIZES)
+    mamba_results = benchmark_model("mamba", MATRIX_SIZES)
 
     # Print summary
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("RESULTS SUMMARY")
-    print("=" * 70)
+    print("=" * 80)
     print("\nTransformer:")
     for r in transformer_results:
-        print(f"  seq_len={r['sequence_length']:4d}: {r['mean_latency']:7.2f} ± {r['std_latency']:5.2f} ms")
+        print(f"  matrix={r['matrix_size']:3d}x{r['matrix_size']:3d} "
+              f"(seq_len={r['sequence_length']:4d}, patches={r['n_patches']:4d}): "
+              f"{r['mean_latency']:7.2f} ± {r['std_latency']:5.2f} ms")
 
     print("\nMamba:")
     for r in mamba_results:
-        print(f"  seq_len={r['sequence_length']:4d}: {r['mean_latency']:7.2f} ± {r['std_latency']:5.2f} ms")
+        print(f"  matrix={r['matrix_size']:3d}x{r['matrix_size']:3d} "
+              f"(seq_len={r['sequence_length']:4d}, patches={r['n_patches']:4d}): "
+              f"{r['mean_latency']:7.2f} ± {r['std_latency']:5.2f} ms")
 
     print("\nSpeedup (Transformer / Mamba):")
     for i in range(min(len(transformer_results), len(mamba_results))):
         speedup = transformer_results[i]['mean_latency'] / mamba_results[i]['mean_latency']
-        print(f"  seq_len={transformer_results[i]['sequence_length']:4d}: {speedup:.2f}x")
+        matrix_size = transformer_results[i]['matrix_size']
+        print(f"  matrix={matrix_size:3d}x{matrix_size:3d}: {speedup:.2f}x")
 
     # Create plot
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("Generating plot...")
     plot_results(transformer_results, mamba_results)
 
-    print("=" * 70)
+    print("=" * 80)
     print("Benchmark complete!")
-    print("=" * 70)
+    print("=" * 80)
 
 
 if __name__ == "__main__":
