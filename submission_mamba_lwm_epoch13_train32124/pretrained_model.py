@@ -141,7 +141,7 @@ class EncoderLayer(nn.Module):
 
 class lwm(nn.Module):
     """
-    Large Wireless Model (LWM): A Transformer-based encoder model for
+    Large Wireless Model (LWM): A Transformer-based encoder model for 
     extracting rich embeddings from wireless channel data.
 
     Args:
@@ -151,63 +151,30 @@ class lwm(nn.Module):
         max_len (int): Maximum number of tokens (sequence length).
         n_heads (int): Number of self-attention heads.
         dropout (float): Dropout probability used across the model.
-        patch_sizes (list, optional): List of patch sizes for multi-resolution mode.
-            When provided, creates resolution-specific embeddings and decoders.
     """
-    def __init__(self, element_length=32, d_model=128, n_layers=12, max_len=513, n_heads=8, dropout=0.1, patch_sizes=None):
+    def __init__(self, element_length=32, d_model=128, n_layers=12, max_len=513, n_heads=8, dropout=0.1):
         super().__init__()
-
+        
+        self.element_length = element_length
         self.d_model        = d_model
         self.n_layers       = n_layers
         self.max_len        = max_len
         self.n_heads        = n_heads
         self.dropout        = dropout
-
-        # Shared transformer layers
+        
+        self.embedding = Embedding(element_length, d_model, max_len)
         self.layers = nn.ModuleList(
             [EncoderLayer(d_model, n_heads, d_model*4, dropout) for _ in range(n_layers)]
         )
         self.linear = nn.Linear(d_model, d_model)
         self.norm = LayerNormalization(d_model)
 
-        if patch_sizes is not None:
-            # Multi-resolution mode: resolution-specific embeddings and decoders
-            self.element_length = None
-            self.embedding = None
+        embed_weight = self.embedding.proj.weight
+        _, n_dim = embed_weight.size()
+        self.decoder = nn.Linear(d_model, n_dim, bias=False)
+        self.decoder_bias = nn.Parameter(torch.zeros(n_dim))
 
-            self.resolution_embeddings = nn.ModuleDict()
-            for ps in patch_sizes:
-                patch_dim = ps * ps * 2
-                self.resolution_embeddings[str(patch_dim)] = nn.Linear(patch_dim, d_model)
-
-            # Shared positional encoding and norm (operate on d_model, not patch_dim)
-            self.pos_embed = nn.Embedding(max_len, d_model)
-            self.embed_norm = LayerNormalization(d_model)
-
-            # Resolution-specific decoders
-            self.resolution_decoders = nn.ModuleDict()
-            self.resolution_decoder_biases = nn.ParameterDict()
-            for ps in patch_sizes:
-                patch_dim = ps * ps * 2
-                self.resolution_decoders[str(patch_dim)] = nn.Linear(d_model, patch_dim, bias=False)
-                self.resolution_decoder_biases[str(patch_dim)] = nn.Parameter(torch.zeros(patch_dim))
-
-            self.decoder = None
-            self.decoder_bias = None
-        else:
-            # Single-resolution mode (original behavior)
-            self.element_length = element_length
-            self.resolution_embeddings = None
-            self.resolution_decoders = None
-            self.resolution_decoder_biases = None
-
-            self.embedding = Embedding(element_length, d_model, max_len)
-            embed_weight = self.embedding.proj.weight
-            _, n_dim = embed_weight.size()
-            self.decoder = nn.Linear(d_model, n_dim, bias=False)
-            self.decoder_bias = nn.Parameter(torch.zeros(n_dim))
-
-    def forward(self, input_ids, masked_pos=None, patch_dim=None):
+    def forward(self, input_ids, masked_pos=None):
         """
         Forward pass of the LWM model.
 
@@ -216,8 +183,6 @@ class lwm(nn.Module):
                                       B is batch size, T is sequence length.
             masked_pos (torch.Tensor, optional): Indices of masked positions for patch prediction.
                                                  If provided, returns logits for these positions.
-            patch_dim (int, optional): Patch dimension for multi-resolution mode.
-                                       If None, auto-inferred from input_ids.shape[-1].
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor] if masked_pos is provided:
@@ -227,17 +192,7 @@ class lwm(nn.Module):
             torch.Tensor if masked_pos is None:
                 - output: Full contextualized embeddings of shape (B, T, d_model).
         """
-        if self.resolution_embeddings is not None:
-            # Multi-resolution mode
-            if patch_dim is None:
-                patch_dim = input_ids.shape[-1]
-            key = str(patch_dim)
-            tok_emb = self.resolution_embeddings[key](input_ids.float())
-            seq_len = input_ids.size(1)
-            pos = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
-            output = self.embed_norm(tok_emb + self.pos_embed(pos))
-        else:
-            output = self.embedding(input_ids)
+        output = self.embedding(input_ids)
 
         for layer in self.layers:
             output, attn = layer(output)
@@ -246,15 +201,7 @@ class lwm(nn.Module):
             masked_pos = masked_pos.long()[:, :, None].expand(-1, -1, output.size(-1))
             h_masked = torch.gather(output, 1, masked_pos)
             h_masked = self.norm(F.relu(self.linear(h_masked)))
-
-            if self.resolution_decoders is not None:
-                if patch_dim is None:
-                    patch_dim = input_ids.shape[-1]
-                key = str(patch_dim)
-                logits_lm = self.resolution_decoders[key](h_masked) + self.resolution_decoder_biases[key]
-            else:
-                logits_lm = self.decoder(h_masked) + self.decoder_bias
-
+            logits_lm = self.decoder(h_masked) + self.decoder_bias
             return logits_lm, output
         else:
             return output

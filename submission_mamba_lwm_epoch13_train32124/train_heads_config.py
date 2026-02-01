@@ -68,25 +68,21 @@ class ChannelInterpolationHead(nn.Module):
     Args:
         input_dim (tuple): (n_patches, d_model).
         output_dim (tuple): (target_channels, n_rows, n_cols) — shape of the output channel matrix.
-        patch_size (int): Spatial patch size (e.g., 2, 4, 6, 8). Each patch has patch_size*patch_size*2 values.
     """
-    def __init__(self, input_dim, output_dim, patch_size=4):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
-        n_patches, d_model = input_dim
-        target_channels, self.n_rows, self.n_cols = output_dim
-        self.patch_size = patch_size
-        self.patch_dim = patch_size * patch_size * 2
+        n_patches, d_model = input_dim 
+        target_channels, self.n_rows, self.n_cols = output_dim 
         self.fcn = nn.Sequential(
-            nn.Linear(d_model, self.patch_dim)
+            nn.Linear(d_model, 32)
         )
 
     def forward(self, x):
         batch_size, n_patches, d_model = x.size()
         x = x.reshape(batch_size * n_patches, d_model)
-        x = self.fcn(x)
-        x = x.reshape(batch_size, n_patches, self.patch_dim)
-        x = patch_reconstructor(x, self.n_rows, self.n_cols,
-                                patch_rows=self.patch_size, patch_cols=self.patch_size)
+        x = self.fcn(x)  
+        x = x.reshape(batch_size, n_patches, 32)
+        x = patch_reconstructor(x, self.n_rows, self.n_cols)
         return x
 
 class ChannelEstimationHead(nn.Module):
@@ -98,25 +94,21 @@ class ChannelEstimationHead(nn.Module):
     Args:
         input_dim (tuple): (n_patches, d_model).
         output_dim (tuple): (target_channels, n_rows, n_cols) — shape of the target full-resolution channel.
-        patch_size (int): Spatial patch size (e.g., 2, 4, 6, 8). Each patch has patch_size*patch_size*2 values.
     """
-    def __init__(self, input_dim, output_dim, patch_size=4):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
-        n_patches, d_model = input_dim
-        target_channels, self.n_rows, self.n_cols = output_dim
-        self.patch_size = patch_size
-        self.patch_dim = patch_size * patch_size * 2
+        n_patches, d_model = input_dim 
+        target_channels, self.n_rows, self.n_cols = output_dim 
         self.fcn = nn.Sequential(
-            nn.Linear(d_model, self.patch_dim)
+            nn.Linear(d_model, 32)
         )
-
+        
     def forward(self, x):
         batch_size, n_patches, d_model = x.size()
         x = x.reshape(batch_size * n_patches, d_model)
-        x = self.fcn(x)
-        x = x.reshape(batch_size, n_patches, self.patch_dim)
-        x = patch_reconstructor(x, self.n_rows, self.n_cols,
-                                patch_rows=self.patch_size, patch_cols=self.patch_size)
+        x = self.fcn(x)  
+        x = x.reshape(batch_size, n_patches, 32)
+        x = patch_reconstructor(x, self.n_rows, self.n_cols)
         return x
 
 class ChannelChartingHead(nn.Module):

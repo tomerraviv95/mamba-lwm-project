@@ -806,10 +806,15 @@ elif MODEL_TYPE == "transformer" or MODEL_TYPE == "raw":
         clean_state_dict = None  # No weights to reload for raw mode
 
 # Override training configs for "raw" mode
-# Use raw_channel for all tasks (flattened raw patch features, no LWM)
+# Map original input_type to appropriate raw variant:
+#   cls_emb, mean_pooled -> raw (mean pooled)
+#   channel_emb -> raw_channel (full sequence for reconstruction)
 if MODEL_TYPE == "raw":
     for cfg in thc.training_configs:
-        cfg["input_type"] = "raw_channel"
+        if cfg["input_type"] in ["cls_emb", "mean_pooled"]:
+            cfg["input_type"] = "raw"
+        elif cfg["input_type"] == "channel_emb":
+            cfg["input_type"] = "raw_channel"
         cfg["fine_tune_layers"] = None  # LWM is bypassed
 
 # Results storage

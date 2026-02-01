@@ -1,0 +1,4 @@
+Model,Task 1: LoS/NLoS Classification,Task 2: Beam Prediction,Task 3: Channel Interpolation,Task 4: Channel Estimation,Task 5: User Localization,Composite Score
+Baseline (official lwm weights),0.940,0.614,0.416,0.458,0.671,0.620
+Transformer (trained by me),0.840,0.671,0.444,0.441,0.529,0.585
+Mamba,0.925,0.763,0.460,0.393,0.647,0.638

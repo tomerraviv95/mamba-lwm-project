@@ -1,5 +1,4 @@
 import gc
-import math
 import psutil
 import torch
 import torch.nn as nn
@@ -624,31 +623,27 @@ def patch_reconstructor(patches, original_rows, original_cols, patch_rows=4, pat
     assert patch_size == patch_rows * patch_cols * 2, "Patch size does not match patch_rows * patch_cols * 2"
 
     # Step 2: Compute the number of patches along rows and columns
-    # Use ceiling division to match the patchify function's padding behavior
-    n_patches_rows = math.ceil(original_rows / patch_rows)
-    n_patches_cols = math.ceil(original_cols / patch_cols)
+    # Use integer division since no padding is needed
+    n_patches_rows = original_rows // patch_rows
+    n_patches_cols = original_cols // patch_cols
     assert n_patches == n_patches_rows * n_patches_cols, "Number of patches does not match expected grid"
 
     # Step 3: Reshape patches back into 2D blocks
     patches_2d = patches.reshape(n_samples, n_patches_rows, n_patches_cols, patch_rows, patch_cols * 2)
 
-    # Step 4: Reconstruct the interleaved matrix into padded dimensions
-    padded_rows = n_patches_rows * patch_rows
-    padded_cols = n_patches_cols * patch_cols
-    interleaved = torch.zeros((n_samples, padded_rows, padded_cols * 2), dtype=torch.float32, device=patches.device)
+    # Step 4: Reconstruct the interleaved matrix
+    # No padding, so use original dimensions directly
+    interleaved = torch.zeros((n_samples, original_rows, original_cols * 2), dtype=torch.float32, device=patches.device)
     for i in range(n_patches_rows):
         for j in range(n_patches_cols):
             interleaved[:, i * patch_rows:(i + 1) * patch_rows, j * patch_cols * 2:(j + 1) * patch_cols * 2] = \
                 patches_2d[:, i, j, :, :]
 
-    # Step 5: Crop to original dimensions (remove padding)
-    interleaved = interleaved[:, :original_rows, :original_cols * 2]
-
-    # Step 6: De-interleave real and imaginary parts
+    # Step 5: De-interleave real and imaginary parts
     flat_real = interleaved[:, :, 0::2]
     flat_imag = interleaved[:, :, 1::2]
 
-    # Step 7: Stack real and imaginary parts as separate channels along axis=1
+    # Step 6: Stack real and imaginary parts as separate channels along axis=1
     reconstructed = torch.stack((flat_real, flat_imag), dim=1)  # Shape: (n_samples, 2, original_rows, original_cols)
 
     return reconstructed
@@ -661,12 +656,11 @@ class HDF5Dataset(torch.utils.data.Dataset):
     eliminating the need for LRU caching. The OS handles memory mapping automatically.
 
     Args:
-        file_metadata (list): List of (filepath, group_name, num_samples, patch_dim) tuples
-                              patch_dim is None for single-resolution mode
+        file_metadata (list): List of (filepath, group_name, num_samples) tuples
         indices (list): List of (file_idx, sample_idx) tuples indicating which samples to use
     """
     def __init__(self, file_metadata, indices):
-        self.file_metadata = file_metadata  # [(filepath, group_name, num_samples, patch_dim), ...]
+        self.file_metadata = file_metadata  # [(filepath, group_name, num_samples), ...]
         self.indices = indices  # [(file_idx, sample_idx), ...]
 
     def __len__(self):
@@ -676,7 +670,7 @@ class HDF5Dataset(torch.utils.data.Dataset):
         file_idx, sample_idx = self.indices[idx]
 
         # Get file info
-        filepath, group_name, _, patch_dim = self.file_metadata[file_idx]
+        filepath, group_name, _ = self.file_metadata[file_idx]
 
         # Open file and read specific sample directly (no caching needed)
         # HDF5's chunked storage makes this efficient
@@ -689,20 +683,12 @@ class HDF5Dataset(torch.utils.data.Dataset):
                 masked_tokens = group['masked_tokens'][sample_idx]
                 masked_pos = group['masked_pos'][sample_idx]
 
-                # Get patch_dim if not already in metadata (for backward compatibility)
-                if patch_dim is None and 'patch_dim' in group.attrs:
-                    patch_dim = int(group.attrs['patch_dim'])
-
             # Convert to tensors
             input_ids = torch.tensor(input_ids, dtype=torch.float32)
             masked_tokens = torch.tensor(masked_tokens, dtype=torch.float32)
             masked_pos = torch.tensor(masked_pos, dtype=torch.long)
 
-            # Return patch_dim as well (or None for single-resolution)
-            if patch_dim is not None:
-                return input_ids, masked_tokens, masked_pos, torch.tensor(patch_dim, dtype=torch.long)
-            else:
-                return input_ids, masked_tokens, masked_pos
+            return input_ids, masked_tokens, masked_pos
 
         except (OSError, KeyError) as e:
             raise RuntimeError(
@@ -854,21 +840,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                     optimizer.zero_grad()
 
                     # Move data to device
-                    # Handle both 3-tuple (single-res) and 4-tuple (multi-res) batches
-                    if len(batch) == 4:
-                        # Multi-resolution mode: (input_ids, masked_tokens, masked_pos, patch_dim)
-                        input_ids, masked_tokens, masked_pos, patch_dim = [b.to(device) for b in batch]
-                        patch_dim_value = patch_dim[0].item()  # All samples in batch have same patch_dim
-                    else:
-                        # Single-resolution mode: (input_ids, masked_tokens, masked_pos)
-                        input_ids, masked_tokens, masked_pos = [b.to(device) for b in batch]
-                        patch_dim_value = None
+                    input_ids, masked_tokens, masked_pos = [b.to(device) for b in batch]
 
-                    # Forward pass (pass patch_dim if available)
-                    if patch_dim_value is not None:
-                        logits_lm = model(input_ids, masked_pos, patch_dim=patch_dim_value)[0]
-                    else:
-                        logits_lm = model(input_ids, masked_pos)[0]
+                    # Forward pass
+                    logits_lm = model(input_ids, masked_pos)[0]
 
                     # Compute MSE loss
                     loss = criterion(masked_tokens, logits_lm)
@@ -911,21 +886,10 @@ def train_lwm(model, train_loaders, val_loaders, optimizer, scheduler, epochs, d
                     with tqdm(val_loader, desc=f"Length {length} [Validation]", unit="batch") as t:
                         for batch in t:
                             # Move data to device
-                            # Handle both 3-tuple (single-res) and 4-tuple (multi-res) batches
-                            if len(batch) == 4:
-                                # Multi-resolution mode
-                                input_ids, masked_tokens, masked_pos, patch_dim = [b.to(device) for b in batch]
-                                patch_dim_value = patch_dim[0].item()
-                            else:
-                                # Single-resolution mode
-                                input_ids, masked_tokens, masked_pos = [b.to(device) for b in batch]
-                                patch_dim_value = None
+                            input_ids, masked_tokens, masked_pos = [b.to(device) for b in batch]
 
-                            # Forward pass (pass patch_dim if available)
-                            if patch_dim_value is not None:
-                                logits_lm = model(input_ids, masked_pos, patch_dim=patch_dim_value)[0]
-                            else:
-                                logits_lm = model(input_ids, masked_pos)[0]
+                            # Forward pass
+                            logits_lm = model(input_ids, masked_pos)[0]
 
                             # Compute MSE loss
                             mse = criterion(masked_tokens, logits_lm)

@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # 1.5. HDF5 HELPER FUNCTIONS
 #     - Functions to save and load tokenized data in HDF5 format
 # =============================================================================
-def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, chunk_size=32):
+def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, patch_dim=None, chunk_size=32):
     """
     Save tokenized data to HDF5 file with optimal chunking for random access.
 
@@ -48,6 +48,7 @@ def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, chunk_siz
         hdf5_path (str): Path to HDF5 file
         tokenized_data_list (list): List of [input_ids, masked_tokens, masked_pos] samples
         seq_length (int): Sequence length for this group
+        patch_dim (int, optional): Patch dimension for multi-resolution mode
         chunk_size (int): Number of samples per chunk (default: 32)
     """
     num_samples = len(tokenized_data_list)
@@ -71,8 +72,13 @@ def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, chunk_siz
 
     # Create or append to HDF5 file
     with h5py.File(hdf5_path, 'a') as f:
-        # Create group for this sequence length
-        group_name = f'length_{seq_length}'
+        # Create group for this sequence length (and patch_dim if multi-resolution)
+        if patch_dim is not None:
+            # Multi-resolution: include patch_dim in group name
+            group_name = f'length_{seq_length}_patch{patch_dim}'
+        else:
+            # Single resolution: only sequence length
+            group_name = f'length_{seq_length}'
 
         if group_name in f:
             # Group already exists, remove it to overwrite
@@ -111,9 +117,72 @@ def save_tokenized_to_hdf5(hdf5_path, tokenized_data_list, seq_length, chunk_siz
         # Store metadata
         group.attrs['num_samples'] = num_samples
         group.attrs['seq_length'] = seq_length
+        if patch_dim is not None:
+            group.attrs['patch_dim'] = patch_dim
         group.attrs['input_ids_shape'] = input_ids_shape
         group.attrs['masked_tokens_shape'] = masked_tokens_shape
         group.attrs['masked_pos_shape'] = masked_pos_shape
+
+
+def tokenizer_train_multiresolution(channels, patch_sizes, masking_percent=0.40, mask=True, seed=42):
+    """
+    Tokenize channel data with multiple patch sizes for multi-resolution training.
+
+    Args:
+        channels: List of channel arrays
+        patch_sizes: List of patch sizes (e.g., [2, 4, 6, 8])
+        masking_percent: Masking percentage
+        mask: Whether to apply masking
+        seed: Random seed
+
+    Returns:
+        Dictionary mapping (seq_length, patch_dim) tuples to tokenized samples.
+        Format: {(seq_len, patch_dim): [samples]}
+    """
+    from utils import patch_maker, make_sample
+    from tqdm import tqdm
+
+    multiresolution_data = defaultdict(list)
+
+    print(f"\nTokenizing with multiple patch sizes: {patch_sizes}")
+
+    for patch_size in patch_sizes:
+        print(f"\n  Processing patch size {patch_size}x{patch_size}...")
+        patch_dim = patch_size * patch_size * 2
+
+        # Create patches for this resolution
+        patches = [patch_maker(channel_set, patch_rows=patch_size, patch_cols=patch_size)
+                   for channel_set in channels]
+        patches = [patch for patch_list in patches for patch in patch_list]
+
+        grouped_data = defaultdict(list)
+
+        for user_idx in tqdm(range(len(patches)), desc=f"  Tokenizing {patch_size}x{patch_size}"):
+            n_patches = patches[user_idx].shape[0]
+            n_masks_half = int(masking_percent * n_patches)
+
+            # Special tokens sized for this patch dimension
+            word2id = {
+                '[CLS]': 0.2 * np.ones((patch_dim)),
+                '[MASK]': 0.1 * np.ones((patch_dim))
+            }
+
+            sample = make_sample(
+                user_idx, patches, word2id, n_patches, n_masks_half, patch_dim, mask=mask, seed=seed
+            )
+
+            if mask:
+                seq_length = len(sample[0])
+                # Store with key (seq_length, patch_dim) to distinguish different resolutions
+                grouped_data[seq_length].append(sample)
+
+        # Merge into multiresolution_data with composite key
+        for seq_length, samples in grouped_data.items():
+            # Key: (seq_length, patch_dim) to uniquely identify resolution
+            multiresolution_data[(seq_length, patch_dim)].extend(samples)
+            print(f"    Seq length {seq_length}: {len(samples)} samples with patch_dim={patch_dim}")
+
+    return multiresolution_data
 
 
 # =============================================================================
@@ -806,15 +875,24 @@ def scenario_prop():
 #    - Set training epochs, batch sizes, learning rates, model dimensions, etc.
 # =============================================================================
 
-EPOCHS = 100
+EPOCHS = 50
 BATCH_SIZE = 32
 VAL_BATCH_SIZE = 32
 WARMUP_EPOCHS = 10
 BASE_LR = 5e-4
 MIN_LR = 1e-8
+
+# Multi-resolution support: Define multiple patch sizes for Mamba
+# For transformer: use single patch size (set PATCH_SIZES to None or [4])
+# For mamba: use multiple patch sizes for resolution-adaptive training
+PATCH_SIZES = [2, 4, 6, 8]  # Multiple patch sizes for multi-resolution Mamba
+# PATCH_SIZES = None  # Uncomment for single-resolution mode (4x4 patches)
+
+# Legacy single-resolution parameters (used when PATCH_SIZES is None)
 N_ROWS = 4
 N_COLUMNS = 4
 ELEMENT_LENGTH = N_ROWS * N_COLUMNS * 2
+
 D_MODEL = 128
 MAX_LEN = 513
 N_LAYERS = 12
@@ -838,7 +916,7 @@ task = [
 
 # Model architecture selection: "transformer" or "mamba"
 MODEL_ARCHITECTURE = "transformer"  # Change to "mamba" to use Mamba-based architecture
-save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}"
+save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}_multi_patches"
 
 # Mamba-specific hyperparameters (only used if MODEL_ARCHITECTURE == "mamba")
 D_STATE = 8  # SSM state dimension
@@ -848,7 +926,7 @@ BIDIRECTIONAL = True  # Use bidirectional Mamba for masked language modeling
 
 # Filter for specific sequence lengths (set to None or [] to use all sequence lengths)
 # Example: FILTER_SEQ_LENGTHS = [33, 65, 129] to train only on these lengths
-FILTER_SEQ_LENGTHS = [17, 33, 65, 129, 257]  # Set to None or [] to use all, or specify list like [33, 65, 129]
+FILTER_SEQ_LENGTHS = [17, 33, 65, 129]  # Set to None or [] to use all, or specify list like [33, 65, 129]
 
 # =============================================================================
 # 5. DATA GENERATION LOOP
@@ -915,26 +993,46 @@ if __name__ == "__main__":
                 print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, skipping tokenization")
                 continue
 
-            # Tokenize the data
+            # Tokenize the data (multi-resolution or single-resolution)
             print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}")
-            scenario_preprocessed_dict = tokenizer_train(
-                [scenario_channels],
-                max_len=MAX_LEN,
-                masking_percent=MASK_PERCENT,
-                mask=True,
-                seed=42,
-            )
-
-            # Save tokenized data to HDF5 file (one file per scenario+bs, with groups by sequence length)
-            print(f"Saving tokenized data to: {hdf5_filepath}")
-            for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
-                save_tokenized_to_hdf5(
-                    hdf5_filepath,
-                    tokenized_samples,
-                    seq_length=int(seq_length),
-                    chunk_size=32
+            if PATCH_SIZES is not None:
+                # Multi-resolution tokenization for Mamba
+                scenario_preprocessed_dict = tokenizer_train_multiresolution(
+                    [scenario_channels],
+                    patch_sizes=PATCH_SIZES,
+                    masking_percent=MASK_PERCENT,
+                    mask=True,
+                    seed=42,
                 )
-                print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
+                # Save with composite keys (seq_length, patch_dim)
+                print(f"Saving multi-resolution tokenized data to: {hdf5_filepath}")
+                for (seq_length, patch_dim), tokenized_samples in scenario_preprocessed_dict.items():
+                    save_tokenized_to_hdf5(
+                        hdf5_filepath,
+                        tokenized_samples,
+                        seq_length=int(seq_length),
+                        patch_dim=int(patch_dim),
+                        chunk_size=32
+                    )
+                    print(f"  Saved {len(tokenized_samples)} samples for seq_length={seq_length}, patch_dim={patch_dim}")
+            else:
+                # Single-resolution tokenization (original behavior)
+                scenario_preprocessed_dict = tokenizer_train(
+                    [scenario_channels],
+                    max_len=MAX_LEN,
+                    masking_percent=MASK_PERCENT,
+                    mask=True,
+                    seed=42,
+                )
+                print(f"Saving tokenized data to: {hdf5_filepath}")
+                for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
+                    save_tokenized_to_hdf5(
+                        hdf5_filepath,
+                        tokenized_samples,
+                        seq_length=int(seq_length),
+                        chunk_size=32
+                    )
+                    print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
 
             labels.extend(scenario_labels)
 
@@ -1001,26 +1099,46 @@ if __name__ == "__main__":
                     print(f"\nTokenized data already exists for {scenario}, BS #{bs_idx}, Zone {zone}, skipping tokenization")
                     continue
 
-                # Tokenize the data
+                # Tokenize the data (multi-resolution or single-resolution)
                 print(f"\nTokenizing scenario: {scenario}, BS #{bs_idx}, Zone {zone}")
-                scenario_preprocessed_dict = tokenizer_train(
-                    [scenario_channels],
-                    max_len=MAX_LEN,
-                    masking_percent=MASK_PERCENT,
-                    mask=True,
-                    seed=42,
-                )
-
-                # Save tokenized data to HDF5 file (one file per scenario+bs+zone, with groups by sequence length)
-                print(f"Saving tokenized data to: {hdf5_filepath}")
-                for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
-                    save_tokenized_to_hdf5(
-                        hdf5_filepath,
-                        tokenized_samples,
-                        seq_length=int(seq_length),
-                        chunk_size=32
+                if PATCH_SIZES is not None:
+                    # Multi-resolution tokenization for Mamba
+                    scenario_preprocessed_dict = tokenizer_train_multiresolution(
+                        [scenario_channels],
+                        patch_sizes=PATCH_SIZES,
+                        masking_percent=MASK_PERCENT,
+                        mask=True,
+                        seed=42,
                     )
-                    print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
+                    # Save with composite keys (seq_length, patch_dim)
+                    print(f"Saving multi-resolution tokenized data to: {hdf5_filepath}")
+                    for (seq_length, patch_dim), tokenized_samples in scenario_preprocessed_dict.items():
+                        save_tokenized_to_hdf5(
+                            hdf5_filepath,
+                            tokenized_samples,
+                            seq_length=int(seq_length),
+                            patch_dim=int(patch_dim),
+                            chunk_size=32
+                        )
+                        print(f"  Saved {len(tokenized_samples)} samples for seq_length={seq_length}, patch_dim={patch_dim}")
+                else:
+                    # Single-resolution tokenization (original behavior)
+                    scenario_preprocessed_dict = tokenizer_train(
+                        [scenario_channels],
+                        max_len=MAX_LEN,
+                        masking_percent=MASK_PERCENT,
+                        mask=True,
+                        seed=42,
+                    )
+                    print(f"Saving tokenized data to: {hdf5_filepath}")
+                    for seq_length, tokenized_samples in scenario_preprocessed_dict.items():
+                        save_tokenized_to_hdf5(
+                            hdf5_filepath,
+                            tokenized_samples,
+                            seq_length=int(seq_length),
+                            chunk_size=32
+                        )
+                        print(f"  Saved {len(tokenized_samples)} samples for sequence length {seq_length}")
 
                 labels.extend(scenario_labels)
 
@@ -1037,7 +1155,9 @@ if __name__ == "__main__":
         print("\nUsing all sequence lengths")
         filter_keys = None
 
-    file_metadata = defaultdict(list)  # {seq_len: [(filepath, group_name, num_samples), ...]}
+    # Multi-resolution mode: {(seq_len, patch_dim): [(filepath, group_name, num_samples), ...]}
+    # Single-resolution mode: {seq_len: [(filepath, group_name, num_samples), ...]}
+    file_metadata = defaultdict(list)
 
     # Iterate through all HDF5 files in tokenized_base_dir
     for filename in os.listdir(tokenized_base_dir):
@@ -1051,18 +1171,33 @@ if __name__ == "__main__":
                     # Iterate through all groups (sequence lengths) in this file
                     for group_name in f.keys():
                         if group_name.startswith('length_'):
-                            seq_len_key = group_name.replace('length_', '')
-
-                            # Skip if filtering is enabled and this sequence length is not in the filter
-                            if filter_keys and seq_len_key not in filter_keys:
-                                continue
-
                             group = f[group_name]
-                            num_samples = group.attrs['num_samples']
 
-                            # Store: (filepath, group_name, num_samples)
-                            file_metadata[seq_len_key].append((hdf5_filepath, group_name, num_samples))
-                            print(f"  Found group '{group_name}' with {num_samples} samples")
+                            # Check if this is multi-resolution (has patch_dim attribute)
+                            if 'patch_dim' in group.attrs:
+                                # Multi-resolution mode
+                                seq_len = group.attrs['seq_length']
+                                patch_dim = group.attrs['patch_dim']
+                                key = (seq_len, patch_dim)
+
+                                # Apply filter only on seq_len
+                                if filter_keys and str(seq_len) not in filter_keys:
+                                    continue
+
+                                num_samples = group.attrs['num_samples']
+                                file_metadata[key].append((hdf5_filepath, group_name, num_samples, patch_dim))
+                                print(f"  Found group '{group_name}' with {num_samples} samples (seq_len={seq_len}, patch_dim={patch_dim})")
+                            else:
+                                # Single-resolution mode (backward compatible)
+                                seq_len_key = group_name.replace('length_', '').split('_')[0]
+
+                                # Skip if filtering is enabled
+                                if filter_keys and seq_len_key not in filter_keys:
+                                    continue
+
+                                num_samples = group.attrs['num_samples']
+                                file_metadata[seq_len_key].append((hdf5_filepath, group_name, num_samples, None))
+                                print(f"  Found group '{group_name}' with {num_samples} samples")
 
             except (OSError, KeyError) as e:
                 print(f"  WARNING: Error reading HDF5 file: {filename}")
@@ -1070,12 +1205,24 @@ if __name__ == "__main__":
                 print(f"  Skipping this file.")
 
     # Print summary
-    for seq_len_key in sorted(file_metadata.keys(), key=int):
-        total_samples = sum(count for _, _, count in file_metadata[seq_len_key])
-        print(f"\nSequence length {seq_len_key}: {total_samples} total samples from {len(file_metadata[seq_len_key])} file(s)")
+    def sort_key(k):
+        if isinstance(k, tuple):
+            return (k[0], k[1])  # Sort by (seq_len, patch_dim)
+        else:
+            return (int(k), 0)  # Single-resolution: sort by seq_len
+
+    for key in sorted(file_metadata.keys(), key=sort_key):
+        total_samples = sum(count for _, _, count, _ in file_metadata[key])
+        if isinstance(key, tuple):
+            # Multi-resolution mode
+            seq_len, patch_dim = key
+            print(f"\nSeq length {seq_len}, patch_dim {patch_dim}: {total_samples} total samples from {len(file_metadata[key])} file(s)")
+        else:
+            # Single-resolution mode
+            print(f"\nSequence length {key}: {total_samples} total samples from {len(file_metadata[key])} file(s)")
 
     print("\n" + "=" * 80)
-    print(f"Total sequence length keys: {len(file_metadata)}")
+    print(f"Total keys: {len(file_metadata)}")
     print("=" * 80)
 
     # =============================================================================
@@ -1100,7 +1247,7 @@ if __name__ == "__main__":
 
         # Build global indices: list of (file_idx, sample_idx_within_file)
         indices = []
-        for file_idx, (filepath, group_name, num_samples) in enumerate(file_metadata[key]):
+        for file_idx, (filepath, group_name, num_samples, patch_dim) in enumerate(file_metadata[key]):
             for sample_idx in range(num_samples):
                 indices.append((file_idx, sample_idx))
 
@@ -1154,9 +1301,11 @@ if __name__ == "__main__":
         print("=" * 80)
         print("Initializing Mamba-based LWM model")
         print(f"Bidirectional: {BIDIRECTIONAL}")
+        if PATCH_SIZES is not None:
+            print(f"Multi-resolution mode with patch sizes: {PATCH_SIZES}")
         print("=" * 80)
         model = mamba_model.lwm_mamba(
-            element_length=ELEMENT_LENGTH,
+            element_length=ELEMENT_LENGTH if PATCH_SIZES is None else None,
             d_model=D_MODEL,
             n_layers=N_LAYERS,
             max_len=MAX_LEN,
@@ -1165,10 +1314,13 @@ if __name__ == "__main__":
             expand=EXPAND,
             dropout=DROPOUT,
             bidirectional=BIDIRECTIONAL,
+            patch_sizes=PATCH_SIZES,  # Pass patch_sizes for multi-resolution
         ).to(device)
     elif MODEL_ARCHITECTURE.lower() == "transformer":
         print("=" * 80)
         print("Initializing Transformer-based LWM model")
+        if PATCH_SIZES is not None:
+            print(f"Multi-resolution mode with patch sizes: {PATCH_SIZES}")
         print("=" * 80)
         model = pretrained_model.lwm(
             element_length=ELEMENT_LENGTH,
@@ -1177,6 +1329,7 @@ if __name__ == "__main__":
             max_len=MAX_LEN,
             n_heads=N_HEADS,
             dropout=DROPOUT,
+            patch_sizes=PATCH_SIZES,
         ).to(device)
     else:
         raise ValueError(f"Unknown model architecture: {MODEL_ARCHITECTURE}. Choose 'transformer' or 'mamba'.")

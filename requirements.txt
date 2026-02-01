@@ -1,0 +1,24 @@
+# Deep Learning
+torch>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Data Processing
+pandas>=2.0.0
+h5py>=3.8.0
+tqdm>=4.65.0
+
+# Machine Learning
+scikit-learn>=1.2.0
+
+# System Utilities
+psutil>=5.9.0
+
+# Mamba SSM (State Space Model)
+mamba-ssm>=1.0.0
+
+# DeepMIMO (local package in ./DeepMIMO directory)
+# Install with: pip install -e ./DeepMIMO

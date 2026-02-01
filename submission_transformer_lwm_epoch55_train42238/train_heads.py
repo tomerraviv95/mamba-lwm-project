@@ -13,86 +13,24 @@ import sys
 import warnings
 import time
 warnings.filterwarnings("ignore")
-from utils import embedding_space_visual, plot_radar_chart, patch_maker, make_sample
+from utils import embedding_space_visual, tokenizer, plot_radar_chart
 from pretrained_model import lwm
 from mamba_model import lwm_mamba
 import train_heads_config as thc
-from collections import defaultdict
 
 # ============================================================
 # MODEL SELECTION: Choose which pretrained model to use
 # ============================================================
-# Set MODEL_TYPE to "transformer", "mamba", or "raw"
-# "raw" mode bypasses the pretrained model entirely and uses raw patch features
-MODEL_TYPE = "raw"  # Options: "transformer", "mamba", "raw"
-
-# Patch sizes to evaluate (each size is tested across all 5 tasks)
-# For multi-patch mamba: model has resolution-specific embeddings for all sizes
-# For transformer: a separate model is instantiated per patch size
-PATCH_SIZES = [4, 6, 8]
+# Set MODEL_TYPE to either "transformer" or "mamba"
+MODEL_TYPE = "transformer"  # Options: "transformer", "mamba"
 
 # Set the checkpoint path for the selected model
-PRETRAINED_CHECKPOINT_PATHS = {
-    "mamba": "pretrained_models_mamba_multi_patches/lwm_epoch23_train10630.0000_val13929.3614.pth",
-    "transformer": "pretrained_models_transformer_multi_patches/lwm_epoch39_train23834.3095_val16082.2248.pth",
-}
-# For "raw" mode, use transformer as dummy backbone (model is not used)
-PRETRAINED_CHECKPOINT_PATH = PRETRAINED_CHECKPOINT_PATHS["transformer" if MODEL_TYPE == "raw" else MODEL_TYPE]
-# ============================================================
-
-# ============================================================
-# CUSTOM TOKENIZER WITH CONFIGURABLE PATCH SIZE
-# ============================================================
-def tokenizer_custom(channels, patch_size=4, max_len=513, masking_percent=0.40, mask=False, seed=42):
-    """
-    Tokenize wireless channel data into patches with configurable patch size.
-    Based on utils.tokenizer but with configurable patch_size parameter.
-
-    Args:
-        channels (torch.Tensor or list): Input channel data to be tokenized.
-        patch_size (int): Size of square patches (e.g., 4 for 4x4 patches). Defaults to 4.
-        max_len (int): Maximum sequence length for tokenized samples. Defaults to 513.
-        masking_percent (float): Percentage of patches to mask if mask is True. Defaults to 0.40.
-        mask (bool): Whether to apply masking to the tokenized samples. Defaults to False.
-        seed (int): Random seed for reproducibility in masking. Defaults to 42.
-
-    Returns:
-        dict or torch.Tensor: If mask is True, returns a dictionary mapping sequence lengths to lists
-            of tokenized samples. If mask is False, returns a tensor of stacked tokenized samples.
-    """
-    patches = patch_maker(channels, patch_rows=patch_size, patch_cols=patch_size)
-    print(f"\nTokenizing with {patch_size}x{patch_size} patches")
-    print("Total number of samples:", len(patches))
-
-    grouped_data = defaultdict(list)  # Group samples by sequence length
-    grouped_data_2 = []
-
-    for user_idx in tqdm(range(len(patches)), desc="Processing items"):
-        patch_dim = patches[user_idx].shape[1]
-        n_patches = patches[user_idx].shape[0]
-        n_masks_half = int(masking_percent * n_patches)
-
-        word2id = {
-            '[CLS]': 0.2 * np.ones((patch_dim)),
-            '[MASK]': 0.1 * np.ones((patch_dim))
-        }
-
-        sample = make_sample(
-            user_idx, patches, word2id, n_patches, n_masks_half, patch_dim, mask=mask, seed=seed
-        )
-
-        if mask:
-            seq_length = len(sample[0])
-            grouped_data[seq_length].append(sample)
-        else:
-            grouped_data_2.append(sample)
-
-    if mask:
-        normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
-    else:
-        normalized_grouped_data = torch.stack(grouped_data_2, dim=0).float()
-
-    return normalized_grouped_data
+if MODEL_TYPE == "transformer":
+    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_transformer/lwm_epoch55_train42238.9593_val44108.5092.pth"
+elif MODEL_TYPE == "mamba":
+    PRETRAINED_CHECKPOINT_PATH = "pretrained_models_mamba/lwm_epoch13_train32124.5012_val41414.2848.pth"
+else:
+    raise ValueError(f"Invalid MODEL_TYPE: {MODEL_TYPE}. Must be 'transformer' or 'mamba'")
 # ============================================================
 
 # Set environment variable for CuBLAS deterministic behavior
@@ -179,15 +117,9 @@ class FineTuningWrapper(nn.Module):
             torch.Tensor: Output of the task head after processing the input embeddings.
         """
         if input_type == "raw":
-            # Mean pool raw patches (similar to mean_pooled for embeddings)
-            # This keeps parameter counts comparable to the embedding baseline
-            task_input = torch.mean(x, dim=1).unsqueeze(1)
-
-        elif input_type == "raw_channel":
-            # Use raw patches without LWM, excluding CLS token (similar to channel_emb)
-            # Used for reconstruction tasks that need spatial patch information
-            task_input = x[:, 1:]
-
+            # Use the original raw channel input directly for the downstream task
+            task_input = x
+        
         else:
             # Pass input through the LWM model to obtain transformer embeddings
             embeddings = self.model(x)
@@ -266,7 +198,6 @@ def finetune(
     bbox_coord: Optional[float] = None,
     max_head_pars: int = 1e5,
     max_wrapper_pars: int = 3e6,
-    patch_size: int = 4,
 ) -> Tuple[nn.Module, List[float], List[float], List[float], List[float], List[torch.Tensor], List[torch.Tensor]]:
     """
     Fine-tune a pre-trained base model with a task-specific head on a given dataset.
@@ -315,17 +246,15 @@ def finetune(
     # Validate inputs
     if task is None or d_model is None:
         raise ValueError("Task and d_model must be provided.")
-    if input_type not in ["cls_emb", "mean_pooled", "channel_emb", "combined", "arbitrary_meanPooled", "raw", "raw_channel"]:
+    if input_type not in ["cls_emb", "mean_pooled", "channel_emb", "combined", "arbitrary_meanPooled"]:
         raise ValueError(f"Invalid input_type: {input_type}")
 
     # Determine number of patches based on input type
-    # Note: "raw" uses mean pooling, so n_patches=1 (same as mean_pooled)
-    # Note: "raw_channel" uses full sequence minus CLS (same as channel_emb)
-    if input_type in ["cls_emb", "mean_pooled", "arbitrary_meanPooled", "raw"]:
+    if input_type in ["cls_emb", "mean_pooled", "arbitrary_meanPooled"]:
         n_patches = 1
-    elif input_type in ["channel_emb", "raw_channel"]:
+    elif input_type == "channel_emb":
         if sequence_length is None:
-            raise ValueError(f"sequence_length must be provided for input_type '{input_type}'.")
+            raise ValueError("sequence_length must be provided for input_type 'channel_emb'.")
         n_patches = sequence_length - 1
     elif input_type == "combined":
         if sequence_length is None:
@@ -337,12 +266,7 @@ def finetune(
         n_patches = len(selected_tokens)
 
     # Define input dimension
-    # For "raw" and "raw_channel" input, use patch_dim (element_length) instead of d_model
-    if input_type in ["raw", "raw_channel"]:
-        element_length = patch_size * patch_size * 2
-        input_dim = (n_patches, element_length)
-    else:
-        input_dim = (n_patches, d_model)
+    input_dim = (n_patches, d_model)
 
     # Dynamically determine output_dim for regression tasks
     output_dim = None
@@ -363,11 +287,11 @@ def finetune(
     elif task == "ChannelInterpolation":
         if output_dim is None:
             raise ValueError("output_dim could not be determined for ChannelInterpolation.")
-        task_head = thc.ChannelInterpolationHead(input_dim, output_dim, patch_size=patch_size)
+        task_head = thc.ChannelInterpolationHead(input_dim, output_dim)
     elif task == "ChannelEstimation":
         if output_dim is None:
             raise ValueError("output_dim could not be determined for ChannelEstimation.")
-        task_head = thc.ChannelEstimationHead(input_dim, output_dim, patch_size=patch_size)
+        task_head = thc.ChannelEstimationHead(input_dim, output_dim)
     elif task == "ChannelCharting":
         task_head = thc.ChannelChartingHead(input_dim)
     else:
@@ -759,313 +683,267 @@ def measure_inference_latency(
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load model once (for mamba with multi-patch, all resolutions are built-in)
-# For "raw" mode, use transformer as dummy backbone (model is bypassed in forward pass)
-if MODEL_TYPE == "raw":
-    print(f"\nRAW MODE: Using transformer backbone (model will be bypassed)")
-else:
+# Process each task
+scores = []
+num_tasks = 5
+for t in range(1, num_tasks + 1):
+    # Set random seed for reproducibility
+    seed = thc.training_configs[t-1]["seed"]
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
+    
+    # Load universal LWM (Transformer or Mamba based on MODEL_TYPE)
     print(f"\nLoading {MODEL_TYPE.upper()} model from {PRETRAINED_CHECKPOINT_PATH}")
 
-if MODEL_TYPE == "mamba":
-    universal_lwm = lwm_mamba(
-        element_length=32,  # overridden internally when patch_sizes is set
-        d_model=128,
-        n_layers=12,
-        max_len=513,
-        d_state=8,
-        d_conv=4,
-        expand=1.2,
-        dropout=0.1,
-        bidirectional=True,
-        patch_sizes=PATCH_SIZES
-    ).to(device)
+    if MODEL_TYPE == "transformer":
+        universal_lwm = lwm(
+            element_length=32,
+            d_model=128,
+            n_layers=12,
+            max_len=513,
+            n_heads=8,
+            dropout=0.1
+        ).to(device)
+    elif MODEL_TYPE == "mamba":
+        universal_lwm = lwm_mamba(
+            element_length=32,
+            d_model=128,
+            n_layers=12,
+            max_len=513,
+            d_state=8,      # Match your trained model
+            d_conv=4,       # Match your trained model
+            expand=1.2,     # Match your trained model (not 2!)
+            dropout=0.1,
+            bidirectional=True
+        ).to(device)
 
     checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
     clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
-    # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
-    universal_lwm.load_state_dict(clean_state_dict, strict=False)
-
-elif MODEL_TYPE == "transformer" or MODEL_TYPE == "raw":
-    universal_lwm = lwm(
-        element_length=32,  # ignored when patch_sizes is set
-        d_model=128,
-        n_layers=12,
-        max_len=513,
-        n_heads=8,
-        dropout=0.1,
-        patch_sizes=PATCH_SIZES
-    ).to(device)
-
-    # Skip loading weights for "raw" mode (model is not used)
-    if MODEL_TYPE == "transformer":
-        checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
-        clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
-        # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
-        universal_lwm.load_state_dict(clean_state_dict, strict=False)
+    universal_lwm.load_state_dict(clean_state_dict)
+    universal_lwm.requires_grad_(False)
+    
+    # Create task directory
+    task_dir = f"task_{t}"
+    os.makedirs(task_dir, exist_ok=True)
+    
+    # Load task configuration
+    with open(f"{task_dir}/config.json", "r") as f:
+        config = json.load(f)
+    
+    # Load data
+    train_data = torch.load(f"{task_dir}/train_data.pt", map_location="cpu")
+    val_data = torch.load(f"{task_dir}/val_data.pt", map_location="cpu") if os.path.exists(f"{task_dir}/val_data.pt") else None
+    test_data = torch.load(f"{task_dir}/test_data.pt", map_location="cpu") if os.path.exists(f"{task_dir}/test_data.pt") else None
+    
+    # Retrieve training configuration and task head
+    training_config = thc.training_configs[t-1]
+    TaskHead = task_heads[t-1]
+    
+    # Display task name
+    task_name = training_config['task']
+    title = f" Task {t}: {task_name} "
+    border = "+" + "-" * len(title) + "+"
+    print()
+    print(border)
+    print(f"|{title}|")
+    print(border)
+    print()
+    
+    # Extract channels and labels
+    train_channels = train_data["channels"]
+    val_channels = val_data["channels"] if val_data else None
+    test_channels = test_data["channels"] if test_data else None
+    if t <= 2:
+        train_labels = train_data["labels"].to(device).long()
+        val_labels = val_data["labels"].to(device).long() if val_data else None
+        test_labels = test_data["labels"].to(device).long() if test_data else None
     else:
-        clean_state_dict = None  # No weights to reload for raw mode
-
-# Override training configs for "raw" mode
-# Use raw_channel for all tasks (flattened raw patch features, no LWM)
-if MODEL_TYPE == "raw":
-    for cfg in thc.training_configs:
-        cfg["input_type"] = "raw_channel"
-        cfg["fine_tune_layers"] = None  # LWM is bypassed
-
-# Results storage
-all_results = {}
-num_tasks = 5
-task_names = ["LoS/NLoS\nClassification", "Beam\nPrediction", "Channel\nInterpolation", "Channel\nEstimation", "User\nLocalization"]
-baseline_scores = [0.9396, 0.6137, 0.4165, 0.4576, 0.6711]
-
-for patch_size in PATCH_SIZES:
-    element_length = patch_size * patch_size * 2
-    patch_label = f"patch_{patch_size}x{patch_size}"
-
-    print(f"\n{'='*60}")
-    print(f" Evaluating with {patch_size}x{patch_size} patches (dim={element_length})")
-    print(f"{'='*60}")
-
-    scores = []
-
-    for t in range(1, num_tasks + 1):
-        # Set random seed for reproducibility
-        seed = thc.training_configs[t-1]["seed"]
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-        # Reload pretrained weights to reset any fine-tuning changes
-        # Skip for "raw" mode (model is not used)
-        if clean_state_dict is not None:
-            universal_lwm.load_state_dict(clean_state_dict, strict=False)
-        universal_lwm.requires_grad_(False)
-
-        # Load task configuration
-        task_data_dir = f"task_{t}"
-        os.makedirs(task_data_dir, exist_ok=True)
-
-        with open(f"{task_data_dir}/config.json", "r") as f:
-            config = json.load(f)
-
-        # Load data
-        train_data = torch.load(f"{task_data_dir}/train_data.pt", map_location="cpu")
-        val_data = torch.load(f"{task_data_dir}/val_data.pt", map_location="cpu") if os.path.exists(f"{task_data_dir}/val_data.pt") else None
-        test_data = torch.load(f"{task_data_dir}/test_data.pt", map_location="cpu") if os.path.exists(f"{task_data_dir}/test_data.pt") else None
-
-        # Retrieve training configuration
-        training_config = thc.training_configs[t-1]
-        task_name = training_config['task']
-
-        # Display task name
-        title = f" {patch_label} | Task {t}: {task_name} "
-        border = "+" + "-" * len(title) + "+"
-        print()
-        print(border)
-        print(f"|{title}|")
-        print(border)
-        print()
-
-        # Extract channels and labels
-        train_channels = train_data["channels"]
-        val_channels = val_data["channels"] if val_data else None
-        test_channels = test_data["channels"] if test_data else None
-        if t <= 2:
-            train_labels = train_data["labels"].to(device).long()
-            val_labels = val_data["labels"].to(device).long() if val_data else None
-            test_labels = test_data["labels"].to(device).long() if test_data else None
-        else:
-            train_labels = train_data["labels"].to(device)
-            val_labels = val_data["labels"].to(device) if val_data else None
-            test_labels = test_data["labels"].to(device) if test_data else None
-
-        # Tokenize input data with current patch size
-        train_tokens = tokenizer_custom(train_channels, patch_size=patch_size)
-        val_tokens = tokenizer_custom(val_channels, patch_size=patch_size) if val_channels is not None else None
-        test_tokens = tokenizer_custom(test_channels, patch_size=patch_size) if test_channels is not None else None
-
-        # Determine sequence length
-        sequence_length = train_tokens.shape[1]
-
-        # Create datasets and data loaders
-        train_dataset = TensorDataset(train_tokens, train_labels)
-        train_loader = DataLoader(
-            train_dataset,
+        train_labels = train_data["labels"].to(device)
+        val_labels = val_data["labels"].to(device) if val_data else None
+        test_labels = test_data["labels"].to(device) if test_data else None
+    
+    # Tokenize input data
+    train_tokens = tokenizer(train_channels)
+    val_tokens = tokenizer(val_channels) if val_channels is not None else None
+    test_tokens = tokenizer(test_channels) if test_channels is not None else None
+    
+    # Determine sequence length
+    sequence_length = train_tokens.shape[1]
+    
+    # Create datasets and data loaders
+    train_dataset = TensorDataset(train_tokens, train_labels)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=training_config["batch_size"],
+        shuffle=True,
+        worker_init_fn=worker_init_fn,
+        num_workers=0  # Single-threaded for reproducibility
+    )
+    if val_data:
+        val_dataset = TensorDataset(val_tokens, val_labels)
+        val_loader = DataLoader(
+            val_dataset,
             batch_size=training_config["batch_size"],
-            shuffle=True,
+            shuffle=False,
             worker_init_fn=worker_init_fn,
             num_workers=0
         )
-        if val_data:
-            val_dataset = TensorDataset(val_tokens, val_labels)
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=training_config["batch_size"],
-                shuffle=False,
-                worker_init_fn=worker_init_fn,
-                num_workers=0
-            )
-        else:
-            val_loader = None
-        if test_data:
-            test_dataset = TensorDataset(test_tokens, test_labels)
-            test_loader = DataLoader(
-                test_dataset,
-                batch_size=training_config["batch_size"],
-                shuffle=False,
-                worker_init_fn=worker_init_fn,
-                num_workers=0
-            )
-        else:
-            test_loader = None
-
-        # Fine-tune the model
-        wrapper, train_losses, val_losses, test_losses, score, ground_truth, predictions = finetune(
-            base_model=universal_lwm,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            test_loader=test_loader,
-            input_type=training_config["input_type"],
-            fine_tune_layers=training_config["fine_tune_layers"],
-            optimizer_config=training_config["optimizer_config"],
-            scheduler_config=training_config["scheduler"],
-            epochs=training_config["epochs"],
-            task=training_config["task"],
-            d_model=universal_lwm.d_model,
-            sequence_length=sequence_length,
-            selected_tokens=training_config["selected_tokens"],
-            bbox_coord=config["bounding_box_coord"] if t == 5 else None,
-            max_head_pars=config["max_head_parameters"],
-            max_wrapper_pars=config["max_wrapper_parameters"],
-            device=device,
-            patch_size=patch_size
+    else:
+        val_loader = None
+    if test_data:
+        test_dataset = TensorDataset(test_tokens, test_labels)
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=training_config["batch_size"],
+            shuffle=False,
+            worker_init_fn=worker_init_fn,
+            num_workers=0
         )
+    else:
+        test_loader = None
+    
+    # Visualize embeddings before fine-tuning
+    # embeddings = embedding_space_visual(
+    #     universal_lwm,
+    #     test_tokens,
+    #     input_type=training_config["input_type"],
+    #     batch_size=training_config["batch_size"],
+    #     selected_tokens=training_config["selected_tokens"],
+    #     task=training_config["task"],
+    #     labels=test_labels if t <= 2 or t == 5 else None,
+    #     visualization=True,
+    #     visualization_method="tsne",
+    #     device=device
+    # )
+    
+    # Fine-tune the model
+    wrapper, train_losses, val_losses, test_losses, score, ground_truth, predictions = finetune(
+        base_model=universal_lwm,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        input_type=training_config["input_type"],
+        fine_tune_layers=training_config["fine_tune_layers"],
+        optimizer_config=training_config["optimizer_config"],
+        scheduler_config=training_config["scheduler"],
+        epochs=training_config["epochs"],
+        task=training_config["task"],
+        d_model=universal_lwm.d_model,
+        sequence_length=sequence_length,
+        selected_tokens=training_config["selected_tokens"],
+        bbox_coord=config["bounding_box_coord"] if t == 5 else None,
+        max_head_pars=config["max_head_parameters"],
+        max_wrapper_pars=config["max_wrapper_parameters"],
+        device=device
+    )
+    
+    # Visualize embeddings after fine-tuning
+    # finetuned_embeddings = embedding_space_visual(
+    #     wrapper.model,
+    #     test_tokens,
+    #     input_type=training_config["input_type"],
+    #     batch_size=training_config["batch_size"],
+    #     selected_tokens=training_config["selected_tokens"],
+    #     task=training_config["task"],
+    #     labels=test_labels if t <= 2 or t == 5 else None,
+    #     visualization=True,
+    #     visualization_method="tsne",
+    #     device=device
+    # )
 
-        # Create submission directory: submission/task_{t}/patch_{size}x{size}/
-        save_dir = f"submission/task_{t}/{patch_label}"
-        os.makedirs(save_dir, exist_ok=True)
+    # Create submission directory
+    task_dir = f"submission/task_{t}"
+    os.makedirs(task_dir, exist_ok=True)
+    
+    # Save fine-tuned wrapper model weights
+    wrapper_weights_path = os.path.join(task_dir, "wrapper.pt")
+    torch.save(wrapper.state_dict(), wrapper_weights_path)
+    print(f"Saved wrapper weights for task {t} to {wrapper_weights_path}")
+    
+    # Save ground truth and predictions
+    ground_truth_path = os.path.join(task_dir, "ground_truth.pt")
+    predictions_path = os.path.join(task_dir, "predictions.pt")
+    torch.save(ground_truth, ground_truth_path)
+    torch.save(predictions, predictions_path)
+    print(f"Saved ground truth and predictions for task {t}")
+    
+    # Save task score
+    score_path = os.path.join(task_dir, "score.json")
+    with open(score_path, "w") as f:
+        json.dump(float(score), f, indent=7)
+    print(f"Saved task score to {score_path}")
 
-        # Save fine-tuned wrapper model weights
-        wrapper_weights_path = os.path.join(save_dir, "wrapper.pt")
-        torch.save(wrapper.state_dict(), wrapper_weights_path)
-        print(f"Saved wrapper weights to {wrapper_weights_path}")
+    # Measure inference latency
+    print(f"\nMeasuring inference latency for task {t}...")
+    latency_metrics = measure_inference_latency(
+        wrapper=wrapper,
+        test_loader=test_loader,
+        input_type=training_config["input_type"],
+        selected_tokens=training_config["selected_tokens"],
+        device=device,
+        warmup_runs=10,
+        measure_runs=100
+    )
 
-        # Save ground truth and predictions
-        torch.save(ground_truth, os.path.join(save_dir, "ground_truth.pt"))
-        torch.save(predictions, os.path.join(save_dir, "predictions.pt"))
-        print(f"Saved ground truth and predictions for {patch_label} task {t}")
-
-        # Save task score
-        score_path = os.path.join(save_dir, "score.json")
-        with open(score_path, "w") as f:
-            json.dump(float(score), f, indent=2)
-        print(f"Saved task score to {score_path}")
-
-        # Measure inference latency
-        print(f"\nMeasuring inference latency for {patch_label} task {t}...")
-        latency_metrics = measure_inference_latency(
-            wrapper=wrapper,
-            test_loader=test_loader,
-            input_type=training_config["input_type"],
-            selected_tokens=training_config["selected_tokens"],
-            device=device,
-            warmup_runs=10,
-            measure_runs=100
-        )
-
-        # Collect metadata
-        metadata = {
-            "task_name": task_name,
-            "model_type": MODEL_TYPE,
-            "patch_size": patch_size,
-            "patch_dim": element_length,
-            "channel_shape": {
-                "train": list(train_channels.shape),
-                "val": list(val_channels.shape) if val_channels is not None else None,
-                "test": list(test_channels.shape) if test_channels is not None else None
-            },
-            "token_shape": {
-                "train": list(train_tokens.shape),
-                "val": list(val_tokens.shape) if val_tokens is not None else None,
-                "test": list(test_tokens.shape) if test_tokens is not None else None
-            },
-            "sequence_length": int(sequence_length),
-            "d_model": int(universal_lwm.d_model),
-            "input_type": training_config["input_type"],
-            "latency_metrics": latency_metrics,
-            "model_parameters": {
-                "head_parameters": int(count_parameters(wrapper.task_head)),
-                "wrapper_parameters": int(count_parameters(wrapper))
-            }
+    # Collect metadata about input/output sizes
+    metadata = {
+        "task_name": task_name,
+        "model_type": MODEL_TYPE,
+        "channel_shape": {
+            "train": list(train_channels.shape),
+            "val": list(val_channels.shape) if val_channels is not None else None,
+            "test": list(test_channels.shape) if test_channels is not None else None
+        },
+        "token_shape": {
+            "train": list(train_tokens.shape),
+            "val": list(val_tokens.shape) if val_tokens is not None else None,
+            "test": list(test_tokens.shape) if test_tokens is not None else None
+        },
+        "sequence_length": int(sequence_length),
+        "d_model": int(universal_lwm.d_model),
+        "input_type": training_config["input_type"],
+        "latency_metrics": latency_metrics,
+        "model_parameters": {
+            "head_parameters": int(count_parameters(wrapper.task_head)),
+            "wrapper_parameters": int(count_parameters(wrapper))
         }
-
-        # Save metadata
-        metadata_path = os.path.join(save_dir, "metadata.json")
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-        print(f"Saved task metadata to {metadata_path}")
-
-        # Print latency summary
-        if latency_metrics["mean_latency_ms"] is not None:
-            print(f"\nLatency Summary for {patch_label} Task {t}:")
-            print(f"  Mean Latency:        {latency_metrics['mean_latency_ms']:.3f} ms (batch size: {latency_metrics['batch_size']})")
-            print(f"  Per-Sample Latency:  {latency_metrics['per_sample_mean_latency_ms']:.3f} ms")
-            print(f"  Std Dev:             {latency_metrics['std_latency_ms']:.3f} ms")
-            print(f"  Min/Max:             {latency_metrics['min_latency_ms']:.3f} / {latency_metrics['max_latency_ms']:.3f} ms")
-            print(f"  Median:              {latency_metrics['median_latency_ms']:.3f} ms")
-
-        scores.append(float(score))
-
-    # Per-patch composite score
-    composite = float(np.mean(scores))
-    task_score_dict = {}
-    for i, s in enumerate(scores):
-        task_score_dict[thc.training_configs[i]["task"]] = s
-    all_results[patch_label] = {
-        "task_scores": task_score_dict,
-        "composite_score": composite
     }
-    print(f"\nComposite score for {patch_label}: {composite:.5f}")
 
-# Find best patch size
-best_patch = max(all_results, key=lambda k: all_results[k]["composite_score"])
+    # Save metadata
+    metadata_path = os.path.join(task_dir, "metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Saved task metadata to {metadata_path}")
 
-# Save combined composite score with per-patch breakdown
-composite_output = {
-    "per_patch_results": all_results,
-    "best_patch_size": best_patch,
-    "best_composite_score": all_results[best_patch]["composite_score"]
-}
+    # Print latency summary
+    if latency_metrics["mean_latency_ms"] is not None:
+        print(f"\nLatency Summary for Task {t}:")
+        print(f"  Mean Latency:        {latency_metrics['mean_latency_ms']:.3f} ms (batch size: {latency_metrics['batch_size']})")
+        print(f"  Per-Sample Latency:  {latency_metrics['per_sample_mean_latency_ms']:.3f} ms")
+        print(f"  Std Dev:             {latency_metrics['std_latency_ms']:.3f} ms")
+        print(f"  Min/Max:             {latency_metrics['min_latency_ms']:.3f} / {latency_metrics['max_latency_ms']:.3f} ms")
+        print(f"  Median:              {latency_metrics['median_latency_ms']:.3f} ms")
+
+    scores.append(float(score))
+    
+# Calculate and save composite score
+composite_score = np.mean(scores)
 composite_score_path = os.path.join("submission", "composite_score.json")
 with open(composite_score_path, "w") as f:
-    json.dump(composite_output, f, indent=2)
-print(f"\nSaved composite scores to {composite_score_path}")
-print(f"Best patch size: {best_patch} (composite={all_results[best_patch]['composite_score']:.5f})")
-
+    json.dump(composite_score, f, indent=7)
+print("Saved composite score")
+    
 # Create zip archive
 shutil.make_archive("submission", format="zip", root_dir="submission")
 
-# Plot radar charts comparing patch sizes
-fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-angles = np.linspace(0, 2 * np.pi, num_tasks, endpoint=False).tolist()
-angles += angles[:1]
-
-# Plot baseline
-baseline_values = baseline_scores + baseline_scores[:1]
-ax.plot(angles, baseline_values, 'k--', linewidth=1, label='Baseline')
-ax.fill(angles, baseline_values, alpha=0.05, color='gray')
-
-colors = plt.cm.Set2(np.linspace(0, 1, len(PATCH_SIZES)))
-for (patch_label, result), color in zip(all_results.items(), colors):
-    values = list(result["task_scores"].values()) + [list(result["task_scores"].values())[0]]
-    ax.plot(angles, values, '-o', linewidth=2,
-            label=f'{patch_label} (comp={result["composite_score"]:.4f})', color=color)
-    ax.fill(angles, values, alpha=0.1, color=color)
-
-ax.set_xticks(angles[:-1])
-ax.set_xticklabels(task_names)
-ax.set_ylim(0, 1)
-ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
-ax.set_title("Multi-Patch Size Comparison")
-plt.tight_layout()
-plt.show()
+# Define task names and baseline scores
+task_names = ["LoS/NLoS\nClassification", "Beam\nPrediction", "Channel\nInterpolation", "Channel\nEstimation", "User\nLocalization"]
+baseline_scores = [
+    0.9396,
+    0.6137,
+    0.4165,
+    0.4576,
+    0.6711
+]
+plot_radar_chart(task_names, scores, baseline_scores)

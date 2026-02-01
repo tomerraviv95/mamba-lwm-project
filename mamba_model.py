@@ -159,8 +159,15 @@ class lwm_mamba(nn.Module):
 
     Supports bidirectional processing for masked language modeling tasks.
 
+    **Multi-Resolution Support:**
+    When patch_sizes is provided, the model uses resolution-specific embeddings W_emb(L)
+    for each patch size L. This allows the same backbone to handle different tokenization
+    granularities efficiently. Each W_emb(L) is a small learnable projection from
+    patch_dimension to d_model.
+
     Args:
-        element_length (int): Dimensionality of input tokens.
+        element_length (int or list): Dimensionality of input tokens. Can be a single value
+                                       or a list of values corresponding to patch_sizes.
         d_model (int): Embedding dimension used throughout the network.
         n_layers (int): Number of Mamba layers.
         max_len (int): Maximum number of tokens (sequence length).
@@ -169,6 +176,8 @@ class lwm_mamba(nn.Module):
         expand (int): Expansion factor for Mamba blocks.
         dropout (float): Dropout probability used across the model.
         bidirectional (bool): Whether to use bidirectional Mamba (default: True for MLM).
+        patch_sizes (list, optional): List of patch sizes to support (e.g., [2, 4, 6, 8]).
+                                      If provided, creates resolution-specific embeddings.
     """
     def __init__(
         self,
@@ -180,11 +189,11 @@ class lwm_mamba(nn.Module):
         d_conv=4,
         expand=2,
         dropout=0.1,
-        bidirectional=True
+        bidirectional=True,
+        patch_sizes=None
     ):
         super().__init__()
 
-        self.element_length = element_length
         self.d_model = d_model
         self.n_layers = n_layers
         self.max_len = max_len
@@ -193,9 +202,26 @@ class lwm_mamba(nn.Module):
         self.expand = expand
         self.dropout = dropout
         self.bidirectional = bidirectional
+        self.patch_sizes = patch_sizes
 
-        # Input projection (no positional encoding needed for Mamba)
-        self.proj = nn.Linear(element_length, d_model)
+        # Multi-resolution support
+        if patch_sizes is not None:
+            # Create resolution-specific embeddings for each patch size
+            # W_emb(L): patch_dim -> d_model
+            self.resolution_embeddings = nn.ModuleDict()
+            for patch_size in patch_sizes:
+                patch_dim = patch_size * patch_size * 2  # patch_rows × patch_cols × 2 (real+imag)
+                self.resolution_embeddings[str(patch_dim)] = nn.Linear(patch_dim, d_model)
+
+            self.element_length = None  # Variable, depends on input
+            print(f"Multi-resolution Mamba initialized with patch sizes: {patch_sizes}")
+            print(f"Resolution-specific embeddings created for dimensions: {[p*p*2 for p in patch_sizes]}")
+        else:
+            # Single resolution (original behavior)
+            self.element_length = element_length
+            self.proj = nn.Linear(element_length, d_model)
+            self.resolution_embeddings = None
+
         self.input_norm = nn.LayerNorm(d_model)
 
         # Stack of Mamba layers
@@ -216,11 +242,27 @@ class lwm_mamba(nn.Module):
         self.linear = nn.Linear(d_model, d_model)
         self.norm = nn.LayerNorm(d_model)
 
-        # Decoder
-        self.decoder = nn.Linear(d_model, element_length, bias=False)
-        self.decoder_bias = nn.Parameter(torch.zeros(element_length))
+        # Decoder (resolution-specific for multi-resolution mode)
+        if patch_sizes is not None:
+            # Create resolution-specific decoders for each patch size
+            # decoder(L): d_model -> patch_dim
+            self.resolution_decoders = nn.ModuleDict()
+            self.resolution_decoder_biases = nn.ParameterDict()
+            for patch_size in patch_sizes:
+                patch_dim = patch_size * patch_size * 2
+                self.resolution_decoders[str(patch_dim)] = nn.Linear(d_model, patch_dim, bias=False)
+                self.resolution_decoder_biases[str(patch_dim)] = nn.Parameter(torch.zeros(patch_dim))
 
-    def forward(self, input_ids, masked_pos=None):
+            self.decoder = None  # Not used in multi-resolution mode
+            self.decoder_bias = None
+        else:
+            # Single resolution decoder
+            self.decoder = nn.Linear(d_model, element_length, bias=False)
+            self.decoder_bias = nn.Parameter(torch.zeros(element_length))
+            self.resolution_decoders = None
+            self.resolution_decoder_biases = None
+
+    def forward(self, input_ids, masked_pos=None, patch_dim=None):
         """
         Forward pass of the LWM Mamba model.
 
@@ -229,6 +271,8 @@ class lwm_mamba(nn.Module):
                                       B is batch size, T is sequence length.
             masked_pos (torch.Tensor, optional): Indices of masked positions for patch prediction.
                                                  If provided, returns logits for these positions.
+            patch_dim (int, optional): Patch dimension (element_length) for multi-resolution mode.
+                                       Required when using resolution-specific embeddings.
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor] if masked_pos is provided:
@@ -238,11 +282,29 @@ class lwm_mamba(nn.Module):
             torch.Tensor if masked_pos is None:
                 - output: Full contextualized embeddings of shape (B, T, d_model).
         """
-        # Input projection
-        output = self.proj(input_ids.float())
+        # Input projection (resolution-specific or single)
+        if self.resolution_embeddings is not None:
+            # Multi-resolution mode: use resolution-specific embedding
+            if patch_dim is None:
+                # Infer patch_dim from input shape
+                patch_dim = input_ids.shape[-1]
+
+            patch_dim_str = str(patch_dim)
+            if patch_dim_str not in self.resolution_embeddings:
+                raise ValueError(
+                    f"Patch dimension {patch_dim} not supported. "
+                    f"Available dimensions: {list(self.resolution_embeddings.keys())}"
+                )
+
+            # Use resolution-specific embedding W_emb(L)
+            output = self.resolution_embeddings[patch_dim_str](input_ids.float())
+        else:
+            # Single resolution mode (original behavior)
+            output = self.proj(input_ids.float())
+
         output = self.input_norm(output)
 
-        # Pass through Mamba layers
+        # Pass through Mamba layers (shared backbone)
         for layer in self.layers:
             output = layer(output)
 
@@ -251,7 +313,19 @@ class lwm_mamba(nn.Module):
             masked_pos = masked_pos.long()[:, :, None].expand(-1, -1, output.size(-1))
             h_masked = torch.gather(output, 1, masked_pos)
             h_masked = self.norm(F.gelu(self.linear(h_masked)))
-            logits_lm = self.decoder(h_masked) + self.decoder_bias
+
+            # Use resolution-specific decoder if available
+            if self.resolution_decoders is not None:
+                if patch_dim is None:
+                    patch_dim = input_ids.shape[-1]
+                patch_dim_str = str(patch_dim)
+
+                logits_lm = self.resolution_decoders[patch_dim_str](h_masked) + \
+                           self.resolution_decoder_biases[patch_dim_str]
+            else:
+                # Single resolution decoder
+                logits_lm = self.decoder(h_masked) + self.decoder_bias
+
             return logits_lm, output
         else:
             return output

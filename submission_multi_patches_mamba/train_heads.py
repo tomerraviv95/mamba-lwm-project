@@ -24,7 +24,7 @@ from collections import defaultdict
 # ============================================================
 # Set MODEL_TYPE to "transformer", "mamba", or "raw"
 # "raw" mode bypasses the pretrained model entirely and uses raw patch features
-MODEL_TYPE = "raw"  # Options: "transformer", "mamba", "raw"
+MODEL_TYPE = "mamba"  # Options: "transformer", "mamba", "raw"
 
 # Patch sizes to evaluate (each size is tested across all 5 tasks)
 # For multi-patch mamba: model has resolution-specific embeddings for all sizes
@@ -90,7 +90,7 @@ def tokenizer_custom(channels, patch_size=4, max_len=513, masking_percent=0.40, 
     if mask:
         normalized_grouped_data = {key: grouped_data[key] for key in sorted(grouped_data.keys())}
     else:
-        normalized_grouped_data = torch.stack(grouped_data_2, dim=0).float()
+        normalized_grouped_data = torch.stack(grouped_data_2, dim=0)
 
     return normalized_grouped_data
 # ============================================================
@@ -179,15 +179,9 @@ class FineTuningWrapper(nn.Module):
             torch.Tensor: Output of the task head after processing the input embeddings.
         """
         if input_type == "raw":
-            # Mean pool raw patches (similar to mean_pooled for embeddings)
-            # This keeps parameter counts comparable to the embedding baseline
-            task_input = torch.mean(x, dim=1).unsqueeze(1)
-
-        elif input_type == "raw_channel":
-            # Use raw patches without LWM, excluding CLS token (similar to channel_emb)
-            # Used for reconstruction tasks that need spatial patch information
-            task_input = x[:, 1:]
-
+            # Use the original raw channel input directly for the downstream task
+            task_input = x
+        
         else:
             # Pass input through the LWM model to obtain transformer embeddings
             embeddings = self.model(x)
@@ -315,21 +309,23 @@ def finetune(
     # Validate inputs
     if task is None or d_model is None:
         raise ValueError("Task and d_model must be provided.")
-    if input_type not in ["cls_emb", "mean_pooled", "channel_emb", "combined", "arbitrary_meanPooled", "raw", "raw_channel"]:
+    if input_type not in ["cls_emb", "mean_pooled", "channel_emb", "combined", "arbitrary_meanPooled", "raw"]:
         raise ValueError(f"Invalid input_type: {input_type}")
 
     # Determine number of patches based on input type
-    # Note: "raw" uses mean pooling, so n_patches=1 (same as mean_pooled)
-    # Note: "raw_channel" uses full sequence minus CLS (same as channel_emb)
-    if input_type in ["cls_emb", "mean_pooled", "arbitrary_meanPooled", "raw"]:
+    if input_type in ["cls_emb", "mean_pooled", "arbitrary_meanPooled"]:
         n_patches = 1
-    elif input_type in ["channel_emb", "raw_channel"]:
+    elif input_type == "channel_emb":
         if sequence_length is None:
-            raise ValueError(f"sequence_length must be provided for input_type '{input_type}'.")
+            raise ValueError("sequence_length must be provided for input_type 'channel_emb'.")
         n_patches = sequence_length - 1
     elif input_type == "combined":
         if sequence_length is None:
             raise ValueError("sequence_length must be provided for input_type 'combined'.")
+        n_patches = sequence_length
+    elif input_type == "raw":
+        if sequence_length is None:
+            raise ValueError("sequence_length must be provided for input_type 'raw'.")
         n_patches = sequence_length
     else:  # arbitrary_meanPooled
         if selected_tokens is None:
@@ -337,8 +333,8 @@ def finetune(
         n_patches = len(selected_tokens)
 
     # Define input dimension
-    # For "raw" and "raw_channel" input, use patch_dim (element_length) instead of d_model
-    if input_type in ["raw", "raw_channel"]:
+    # For "raw" input, use patch_dim (element_length) instead of d_model
+    if input_type == "raw":
         element_length = patch_size * patch_size * 2
         input_dim = (n_patches, element_length)
     else:
@@ -760,11 +756,7 @@ def measure_inference_latency(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load model once (for mamba with multi-patch, all resolutions are built-in)
-# For "raw" mode, use transformer as dummy backbone (model is bypassed in forward pass)
-if MODEL_TYPE == "raw":
-    print(f"\nRAW MODE: Using transformer backbone (model will be bypassed)")
-else:
-    print(f"\nLoading {MODEL_TYPE.upper()} model from {PRETRAINED_CHECKPOINT_PATH}")
+print(f"\nLoading {MODEL_TYPE.upper()} model from {PRETRAINED_CHECKPOINT_PATH}")
 
 if MODEL_TYPE == "mamba":
     universal_lwm = lwm_mamba(
@@ -785,7 +777,7 @@ if MODEL_TYPE == "mamba":
     # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
     universal_lwm.load_state_dict(clean_state_dict, strict=False)
 
-elif MODEL_TYPE == "transformer" or MODEL_TYPE == "raw":
+elif MODEL_TYPE == "transformer":
     universal_lwm = lwm(
         element_length=32,  # ignored when patch_sizes is set
         d_model=128,
@@ -796,21 +788,10 @@ elif MODEL_TYPE == "transformer" or MODEL_TYPE == "raw":
         patch_sizes=PATCH_SIZES
     ).to(device)
 
-    # Skip loading weights for "raw" mode (model is not used)
-    if MODEL_TYPE == "transformer":
-        checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
-        clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
-        # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
-        universal_lwm.load_state_dict(clean_state_dict, strict=False)
-    else:
-        clean_state_dict = None  # No weights to reload for raw mode
-
-# Override training configs for "raw" mode
-# Use raw_channel for all tasks (flattened raw patch features, no LWM)
-if MODEL_TYPE == "raw":
-    for cfg in thc.training_configs:
-        cfg["input_type"] = "raw_channel"
-        cfg["fine_tune_layers"] = None  # LWM is bypassed
+    checkpoint = torch.load(PRETRAINED_CHECKPOINT_PATH, map_location=device)
+    clean_state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+    # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
+    universal_lwm.load_state_dict(clean_state_dict, strict=False)
 
 # Results storage
 all_results = {}
@@ -836,9 +817,8 @@ for patch_size in PATCH_SIZES:
         torch.cuda.manual_seed_all(seed)
 
         # Reload pretrained weights to reset any fine-tuning changes
-        # Skip for "raw" mode (model is not used)
-        if clean_state_dict is not None:
-            universal_lwm.load_state_dict(clean_state_dict, strict=False)
+        # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
+        universal_lwm.load_state_dict(clean_state_dict, strict=False)
         universal_lwm.requires_grad_(False)
 
         # Load task configuration
