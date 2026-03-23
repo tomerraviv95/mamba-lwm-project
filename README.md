@@ -1,6 +1,8 @@
-# LWM Competition 2025
+# WiMamba: Linear-Scale Wireless Foundation Model
 
-Solution for the [Large Wireless Models (LWM) 2025 Challenge](https://lwm-wireless.net/challenge), which aims to improve performance across five wireless downstream tasks by optimizing a baseline LWM foundation model.
+Official code for the paper **"WiMamba: Linear-Scale Wireless Foundation Model"**.
+
+This repository contains our solution for the [Large Wireless Models (LWM) 2025 Challenge](https://lwm-wireless.net/challenge), which aims to improve performance across five wireless downstream tasks by optimizing a baseline LWM foundation model.
 
 ## Tasks
 
