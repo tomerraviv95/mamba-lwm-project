@@ -364,6 +364,26 @@ def main():
     print("Generating plot...")
     plot_results(transformer_results, mamba_results)
 
+    # Save results to CSV
+    import csv
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'outputs/plots/latency_benchmark.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['matrix_size', 'seq_length', 'n_patches',
+                         'transformer_latency_ms', 'transformer_std_ms',
+                         'mamba_latency_ms', 'mamba_std_ms', 'speedup'])
+        for i in range(min(len(transformer_results), len(mamba_results))):
+            tr = transformer_results[i]
+            mr = mamba_results[i]
+            speedup = tr['mean_latency'] / mr['mean_latency']
+            writer.writerow([
+                tr['matrix_size'], tr['sequence_length'], tr['n_patches'],
+                f"{tr['mean_latency']:.2f}", f"{tr['std_latency']:.2f}",
+                f"{mr['mean_latency']:.2f}", f"{mr['std_latency']:.2f}",
+                f"{speedup:.2f}"
+            ])
+    print(f"\nCSV saved to: {csv_path}")
+
     print("=" * 80)
     print("Benchmark complete!")
     print("=" * 80)
