@@ -27,11 +27,9 @@ lwm-competition-2025/
 │   ├── train_heads.py                 # Main: fine-tune LWM + train task heads
 │   ├── train_heads_config.py          # Task head architectures + training configs
 │   ├── train_lwm.py                   # LWM pretraining pipeline
-│   ├── continue_pretrain.py           # Continued pretraining with new patch sizes
 │   ├── pretrained_model.py            # Transformer-based LWM architecture
 │   ├── mamba_model.py                 # Mamba-based LWM architecture
 │   ├── utils.py                       # Utilities (data loading, tokenization, scoring)
-│   ├── benchmark_latency.py           # Mamba vs Transformer inference latency
 │   ├── benchmark_patch_sizes.py       # RAM/latency vs patch size benchmark
 │   ├── plot_sample_variation.py       # Performance vs training data percentage plots
 │   ├── plot_task_scores.py            # Task score comparison across architectures
@@ -80,7 +78,6 @@ python scripts/train_lwm.py
 
 ### Run benchmarks
 ```bash
-python scripts/benchmark_latency.py       # Mamba vs Transformer latency
 python scripts/benchmark_patch_sizes.py    # Memory/latency vs patch size
 ```
 

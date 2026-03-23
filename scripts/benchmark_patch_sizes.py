@@ -341,6 +341,24 @@ def main():
               f"Latency={r['mean_latency_ms']:.2f}±{r['std_latency_ms']:.2f}ms, "
               f"Memory={r['peak_memory_mb']:.2f}MB")
 
+    # Save results to CSV
+    import csv
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'outputs/plots/benchmark_patch_sizes.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['patch_size', 'seq_length', 'n_patches',
+                         'transformer_latency_ms', 'transformer_std_ms', 'transformer_peak_memory_mb',
+                         'mamba_latency_ms', 'mamba_std_ms', 'mamba_peak_memory_mb'])
+        for i in range(min(len(transformer_results), len(mamba_results))):
+            tr = transformer_results[i]
+            mr = mamba_results[i]
+            writer.writerow([
+                tr['patch_size'], tr['sequence_length'], tr['n_patches'],
+                f"{tr['mean_latency_ms']:.2f}", f"{tr['std_latency_ms']:.2f}", f"{tr['peak_memory_mb']:.2f}",
+                f"{mr['mean_latency_ms']:.2f}", f"{mr['std_latency_ms']:.2f}", f"{mr['peak_memory_mb']:.2f}"
+            ])
+    print(f"\nCSV saved to: {csv_path}")
+
     # Create plot
     print("\n" + "=" * 80)
     print("Generating plot...")

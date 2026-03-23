@@ -1,0 +1,4 @@
+patch_size,seq_length,n_patches,transformer_latency_ms,transformer_std_ms,transformer_peak_memory_mb,mamba_latency_ms,mamba_std_ms,mamba_peak_memory_mb
+4,3601,3600,363.59,5.19,4836.63,23.70,0.50,114.40
+6,1601,1600,79.15,0.90,1002.19,16.17,1.15,75.38
+8,901,900,29.42,0.21,355.67,16.21,1.95,62.41
