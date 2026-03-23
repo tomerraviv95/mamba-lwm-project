@@ -16,7 +16,6 @@ warnings.filterwarnings("ignore")
 from utils import embedding_space_visual, plot_radar_chart, patch_maker, make_sample, subsample_training_data
 from pretrained_model import lwm
 from mamba_model import lwm_mamba
-from wimae_model import lwm_wimae
 import train_heads_config as thc
 from collections import defaultdict
 
@@ -28,7 +27,7 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 # ============================================================
 # Set MODEL_TYPE to "transformer", "mamba", or "raw"
 # "raw" mode bypasses the pretrained model entirely and uses raw patch features
-MODEL_TYPE = "wimae"  # Options: "transformer", "mamba", "raw", "wimae", "contrawimae"
+MODEL_TYPE = "transformer"  # Options: "transformer", "mamba", "raw"
 
 # Fixed patch size for sample variation experiment (will be set by wrapper script)
 PATCH_SIZE = 8
@@ -45,18 +44,14 @@ PATCH_SIZES = [PATCH_SIZE]
 
 # Set the checkpoint path for the selected model
 PRETRAINED_CHECKPOINT_PATHS = {
-    "mamba": os.path.join(_REPO_ROOT, "outputs/pretrained_models/pretrained_models_mamba_multi_patches/lwm_epoch23_train10630.0000_val13929.3614.pth"),
-    "transformer": os.path.join(_REPO_ROOT, "outputs/pretrained_models/pretrained_models_transformer_multi_patches/lwm_epoch39_train23834.3095_val16082.2248.pth"),
-    "wimae": os.path.join(_REPO_ROOT, "WirelessContrastiveMaskedLearning/runs/wimae_training_demo/last_checkpoint.pt"),
-    "contrawimae": os.path.join(_REPO_ROOT, "WirelessContrastiveMaskedLearning/runs/contrawimae_training_demo/last_checkpoint.pt"),
+    "mamba": os.path.join(_REPO_ROOT, "outputs/pretrained_models/mamba_weights/lwm_epoch23_train10630.0000_val13929.3614.pth"),
+    "transformer": os.path.join(_REPO_ROOT, "outputs/pretrained_models/lwm_weights/lwm_epoch39_train23834.3095_val16082.2248.pth"),
 }
 # For "raw" mode, use transformer as dummy backbone (model is not used)
 PRETRAINED_CHECKPOINT_PATH = PRETRAINED_CHECKPOINT_PATHS.get(
     "transformer" if MODEL_TYPE == "raw" else MODEL_TYPE,
     PRETRAINED_CHECKPOINT_PATHS["transformer"]
 )
-# Helper to check if model uses WiMAE-style encoder
-IS_WIMAE_STYLE = MODEL_TYPE in ("wimae", "contrawimae")
 # ============================================================
 
 # ============================================================
@@ -113,33 +108,6 @@ def tokenizer_custom(channels, patch_size=4, max_len=513, masking_percent=0.40, 
 
     return normalized_grouped_data
 
-
-def tokenizer_wimae(channels):
-    """
-    Resize complex channels to 32x32 and stack real/imag as (N, 2, 32, 32) float.
-
-    Args:
-        channels: Complex tensor of shape (N, H, W) or real tensor of shape (N, 2, H, W).
-
-    Returns:
-        Float tensor of shape (N, 2, 32, 32).
-    """
-    import torch.nn.functional as F
-
-    if torch.is_complex(channels):
-        real = channels.real.float()
-        imag = channels.imag.float()
-        x = torch.stack([real, imag], dim=1)  # (N, 2, H, W)
-    elif channels.dim() == 4 and channels.shape[1] == 2:
-        x = channels.float()
-    else:
-        raise ValueError(f"Unexpected channel shape: {channels.shape}")
-
-    if x.shape[2] != 32 or x.shape[3] != 32:
-        x = F.interpolate(x, size=(32, 32), mode="bilinear", align_corners=False)
-
-    return x
-# ============================================================
 
 # Set environment variable for CuBLAS deterministic behavior
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -409,17 +377,11 @@ def finetune(
     elif task == "ChannelInterpolation":
         if output_dim is None:
             raise ValueError("output_dim could not be determined for ChannelInterpolation.")
-        if IS_WIMAE_STYLE:
-            task_head = thc.WiMAEChannelReconstructionHead(input_dim, output_dim)
-        else:
-            task_head = thc.ChannelInterpolationHead(input_dim, output_dim, patch_size=PATCH_SIZE)
+        task_head = thc.ChannelInterpolationHead(input_dim, output_dim, patch_size=PATCH_SIZE)
     elif task == "ChannelEstimation":
         if output_dim is None:
             raise ValueError("output_dim could not be determined for ChannelEstimation.")
-        if IS_WIMAE_STYLE:
-            task_head = thc.WiMAEChannelReconstructionHead(input_dim, output_dim)
-        else:
-            task_head = thc.ChannelEstimationHead(input_dim, output_dim, patch_size=PATCH_SIZE)
+        task_head = thc.ChannelEstimationHead(input_dim, output_dim, patch_size=PATCH_SIZE)
     elif task == "ChannelCharting":
         task_head = thc.ChannelChartingHead(input_dim)
     else:
@@ -458,12 +420,14 @@ def finetune(
         sys.exit(1)
         
     # Save universal LWM weights
-    os.makedirs("submission", exist_ok=True)
-    torch.save(base_model.state_dict(), os.path.join(_REPO_ROOT, "outputs/submissions/submission/model_checkpoint.pth"))
-    shutil.copy("pretrained_model.py", "submission/pretrained_model.py")
-    shutil.copy("utils.py", "submission/utils.py")
-    shutil.copy("train_heads_config.py", "submission/train_heads_config.py")
-    shutil.copy("train_heads.py", "submission/train_heads.py")
+    _submission_dir = os.path.join(_REPO_ROOT, "outputs/submissions/submission")
+    os.makedirs(_submission_dir, exist_ok=True)
+    torch.save(base_model.state_dict(), os.path.join(_submission_dir, "model_checkpoint.pth"))
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    shutil.copy(os.path.join(_script_dir, "pretrained_model.py"), os.path.join(_submission_dir, "pretrained_model.py"))
+    shutil.copy(os.path.join(_script_dir, "utils.py"), os.path.join(_submission_dir, "utils.py"))
+    shutil.copy(os.path.join(_script_dir, "train_heads_config.py"), os.path.join(_submission_dir, "train_heads_config.py"))
+    shutil.copy(os.path.join(_script_dir, "train_heads.py"), os.path.join(_submission_dir, "train_heads.py"))
     
     # Set default optimizer config if not provided
     if optimizer_config is None:
@@ -837,14 +801,6 @@ if MODEL_TYPE == "mamba":
     # strict=False to ignore checkpoint weights for patch sizes not in PATCH_SIZES
     universal_lwm.load_state_dict(clean_state_dict, strict=False)
 
-elif IS_WIMAE_STYLE:
-    universal_lwm = lwm_wimae(
-        checkpoint_path=PRETRAINED_CHECKPOINT_PATH,
-        device=device
-    ).to(device)
-    # Save initial state dict so we can reset after each task's fine-tuning
-    clean_state_dict = {k: v.clone() for k, v in universal_lwm.state_dict().items()}
-
 elif MODEL_TYPE == "transformer" or MODEL_TYPE == "raw":
     universal_lwm = lwm(
         element_length=32,  # ignored when patch_sizes is set
@@ -871,16 +827,6 @@ if MODEL_TYPE == "raw":
     for cfg in thc.training_configs:
         cfg["input_type"] = "raw_channel"
         cfg["fine_tune_layers"] = None  # LWM is bypassed
-
-# Override training configs for "wimae" mode
-# No CLS token: remap cls_emb → mean_pooled, channel_emb → combined
-if IS_WIMAE_STYLE:
-    for cfg in thc.training_configs:
-        if cfg["input_type"] == "cls_emb":
-            cfg["input_type"] = "mean_pooled"
-        elif cfg["input_type"] == "channel_emb":
-            cfg["input_type"] = "combined"
-        cfg["fine_tune_layers"] = ["layers.9", "layers.10", "layers.11"]
 
 # Results storage
 percentage_results = {}
@@ -961,20 +907,12 @@ for sample_pct in SAMPLE_PERCENTAGES:
                 test_labels = test_data["labels"].to(device) if test_data else None
 
             # Tokenize input data
-            if IS_WIMAE_STYLE:
-                train_tokens = tokenizer_wimae(train_channels)
-                val_tokens = tokenizer_wimae(val_channels) if val_channels is not None else None
-                test_tokens = tokenizer_wimae(test_channels) if test_channels is not None else None
-            else:
-                train_tokens = tokenizer_custom(train_channels, patch_size=PATCH_SIZE)
-                val_tokens = tokenizer_custom(val_channels, patch_size=PATCH_SIZE) if val_channels is not None else None
-                test_tokens = tokenizer_custom(test_channels, patch_size=PATCH_SIZE) if test_channels is not None else None
+            train_tokens = tokenizer_custom(train_channels, patch_size=PATCH_SIZE)
+            val_tokens = tokenizer_custom(val_channels, patch_size=PATCH_SIZE) if val_channels is not None else None
+            test_tokens = tokenizer_custom(test_channels, patch_size=PATCH_SIZE) if test_channels is not None else None
 
             # Determine sequence length
-            if IS_WIMAE_STYLE:
-                sequence_length = 128
-            else:
-                sequence_length = train_tokens.shape[1]
+            sequence_length = train_tokens.shape[1]
 
             # Handle edge case where subsampled data is smaller than batch_size
             effective_batch_size = min(training_config["batch_size"], max(1, n_train_samples))

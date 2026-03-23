@@ -38,7 +38,7 @@ for patch_size in PATCH_SIZES:
     import re as _re
     content = _re.sub(
         r'MODEL_TYPE = "[^"]*"  # Options:.*',
-        f'MODEL_TYPE = "{MODEL_TYPE}"  # Options: "transformer", "mamba", "raw", "wimae", "contrawimae"',
+        f'MODEL_TYPE = "{MODEL_TYPE}"  # Options: "transformer", "mamba", "raw"',
         content
     )
 
@@ -87,7 +87,7 @@ print(f"{'='*70}")
 
 print(f"\nResults saved in:")
 for patch_size in PATCH_SIZES:
-    target_dir = f"submission_sample_variation_{MODEL_TYPE}_patch{patch_size}"
+    target_dir = os.path.join(_REPO_ROOT, f"outputs/submissions/submission_sample_variation_{MODEL_TYPE}_patch{patch_size}")
     if os.path.exists(target_dir):
         print(f"  - {target_dir}/")
 

@@ -1340,7 +1340,7 @@ if __name__ == "__main__":
     load_model = False
     if load_model:
         model.load_state_dict(
-            torch.load("models/model_checkpoint.pth", map_location=device)
+            torch.load(os.path.join(_REPO_ROOT, "models/model_checkpoint.pth"), map_location=device)
         )
         print("Pre-trained model loaded successfully.")
 

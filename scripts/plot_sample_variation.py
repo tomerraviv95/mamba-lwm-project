@@ -23,7 +23,7 @@ mpl.rcParams['mathtext.fontset'] = 'stix'
 mpl.rcParams['font.family'] = 'STIXGeneral'
 
 # Configuration
-MODEL_TYPES = ['transformer', 'mamba', 'raw', 'wimae', 'contrawimae']
+MODEL_TYPES = ['transformer', 'mamba', 'raw']
 PATCH_SIZES = [4, 6, 8]
 
 # Load aggregated results from all combinations
@@ -48,24 +48,18 @@ arch_colors = {
     'Transformer': '#1f77b4',
     'Mamba': '#d62728',
     'Raw Channel': '#2ca02c',
-    'WiMAE': '#ff7f0e',
-    'ContraWiMAE': '#9467bd'
 }
 
 arch_styles = {
     'Transformer': '-',
     'Mamba': '--',
     'Raw Channel': ':',
-    'WiMAE': '-.',
-    'ContraWiMAE': '-'
 }
 
 model_display_names = {
     'transformer': 'Transformer',
     'mamba': 'Mamba',
     'raw': 'Raw Channel',
-    'wimae': 'WiMAE',
-    'contrawimae': 'ContraWiMAE'
 }
 
 # Task names for display (excluding Channel Estimation)
@@ -180,13 +174,9 @@ for patch_size in PATCH_SIZES:
                    linewidth=5, marker='o', markersize=16, label='Mamba'),
             Line2D([0], [0], color=arch_colors['Raw Channel'], linestyle=':',
                    linewidth=5, marker='o', markersize=16, label='Raw Channel'),
-            Line2D([0], [0], color=arch_colors['WiMAE'], linestyle='-.',
-                   linewidth=5, marker='o', markersize=16, label='WiMAE'),
-            Line2D([0], [0], color=arch_colors['ContraWiMAE'], linestyle='-',
-                   linewidth=5, marker='o', markersize=16, label='ContraWiMAE')
         ]
         fig.legend(handles=arch_handles, loc='lower center', fontsize=28, handlelength=4,
-                   ncol=5, bbox_to_anchor=(0.5, -0.12))
+                   ncol=3, bbox_to_anchor=(0.5, -0.12))
 
     plt.tight_layout()
 

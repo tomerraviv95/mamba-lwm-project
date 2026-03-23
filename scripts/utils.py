@@ -267,7 +267,7 @@ def deepmimo_data_cleaning(deepmimo_data):
 
 def manual_unzip_scenario(scenario_name):
     """Manually unzip a downloaded scenario to avoid DeepMIMO corruption issues."""
-    scenarios_dir = os.path.join(os.getcwd(), "deepmimo_scenarios")
+    scenarios_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', "deepmimo_scenarios")
     zip_path = os.path.join(scenarios_dir, f"{scenario_name}_downloaded.zip")
     scenario_path = os.path.join(scenarios_dir, scenario_name)
     
