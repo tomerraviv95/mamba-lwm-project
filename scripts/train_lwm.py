@@ -35,6 +35,8 @@ from utils import (
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+_REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+
 
 # =============================================================================
 # 1.5. HDF5 HELPER FUNCTIONS
@@ -916,7 +918,7 @@ task = [
 
 # Model architecture selection: "transformer" or "mamba"
 MODEL_ARCHITECTURE = "transformer"  # Change to "mamba" to use Mamba-based architecture
-save_dir = f"pretrained_models_{MODEL_ARCHITECTURE}_multi_patches"
+save_dir = os.path.join(_REPO_ROOT, f"outputs/pretrained_models/pretrained_models_{MODEL_ARCHITECTURE}_multi_patches")
 
 # Mamba-specific hyperparameters (only used if MODEL_ARCHITECTURE == "mamba")
 D_STATE = 8  # SSM state dimension

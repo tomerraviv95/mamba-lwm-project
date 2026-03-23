@@ -48,14 +48,16 @@ from utils import (
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+_REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 # Model selection
 MODEL_ARCHITECTURE = "transformer"  # or "mamba"
-# CHECKPOINT_PATH = "submission_mamba_lwm_epoch13_train32124/model_checkpoint.pth"
-CHECKPOINT_PATH = "submission_transformer_model_checkpoint/model_checkpoint.pth"
+# CHECKPOINT_PATH = os.path.join(_REPO_ROOT, "outputs/submissions/submission_mamba_lwm_epoch13_train32124/model_checkpoint.pth")
+CHECKPOINT_PATH = os.path.join(_REPO_ROOT, "outputs/submissions/submission_transformer_model_checkpoint/model_checkpoint.pth")
 
 # Patch size configuration
 SOURCE_PATCH_SIZE = 4  # Original patch size model was trained with (4x4)
@@ -94,7 +96,7 @@ BETA2 = 0.999
 VALIDATION_EPOCHS = [1,3,5,8,10]  # Only run validation on these specific epochs
 
 # Save directory
-SAVE_DIR = f"pretrained_models_{MODEL_ARCHITECTURE}_patch{TARGET_PATCH_SIZE}x{TARGET_PATCH_SIZE}"
+SAVE_DIR = os.path.join(_REPO_ROOT, f"outputs/pretrained_models/pretrained_models_{MODEL_ARCHITECTURE}_patch{TARGET_PATCH_SIZE}x{TARGET_PATCH_SIZE}")
 
 # Filter for specific sequence lengths (set to None or [] to use all)
 FILTER_SEQ_LENGTHS = [17, 33, 65, 129, 257]   # Set to [17, 33, 65, 129, 257] to filter, or None to use all

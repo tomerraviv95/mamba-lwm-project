@@ -1,8 +1,11 @@
 import json
+import os
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 import matplotlib as mpl
+
+_REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 
 
 mpl.rcParams['xtick.labelsize'] = 24
@@ -19,13 +22,13 @@ mpl.rcParams['mathtext.fontset'] = 'stix'
 mpl.rcParams['font.family'] = 'STIXGeneral'
 
 # Load the data
-with open('submission_multi_patches_transformer/composite_score.json', 'r') as f:
+with open(os.path.join(_REPO_ROOT, 'outputs/submissions/submission_multi_patches_transformer/composite_score.json'), 'r') as f:
     transformer_data = json.load(f)
 
-with open('submission_multi_patches_mamba/composite_score.json', 'r') as f:
+with open(os.path.join(_REPO_ROOT, 'outputs/submissions/submission_multi_patches_mamba/composite_score.json'), 'r') as f:
     mamba_data = json.load(f)
 
-with open('submission_multi_patches_raw/composite_score.json', 'r') as f:
+with open(os.path.join(_REPO_ROOT, 'outputs/submissions/submission_multi_patches_raw/composite_score.json'), 'r') as f:
     raw_data = json.load(f)
 
 # Extract patch sizes and convert to numeric values for plotting
@@ -115,7 +118,7 @@ arch_handles = [
 ax_legend.legend(handles=arch_handles, loc='center', fontsize=28, handlelength=4)
 
 plt.tight_layout()
-plt.savefig('task_scores_comparison.png', dpi=150, bbox_inches='tight')
+plt.savefig(os.path.join(_REPO_ROOT, 'outputs/plots/task_scores_comparison.png'), dpi=150, bbox_inches='tight')
 plt.show()
 
 print("Plot saved to task_scores_comparison.png")

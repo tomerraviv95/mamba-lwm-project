@@ -310,7 +310,7 @@ def plot_results(transformer_results: List[Dict], mamba_results: List[Dict]):
     plt.tight_layout()
 
     # Save with high DPI
-    output_file = 'latency_comparison.png'
+    output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'outputs/plots/latency_comparison.png')
     plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"\nPlot saved to: {output_file}")
 

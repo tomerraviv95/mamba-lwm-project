@@ -300,7 +300,7 @@ def plot_results(transformer_results: List[Dict], mamba_results: List[Dict]):
     ax2.legend(handles=style_handles_2, loc='upper right', handlelength=3)
 
     plt.tight_layout()
-    plt.savefig('benchmark_patch_sizes.png', dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'outputs/plots/benchmark_patch_sizes.png'), dpi=150, bbox_inches='tight')
     plt.show()
 
     print("\nPlot saved to benchmark_patch_sizes.png")

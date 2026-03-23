@@ -12,7 +12,7 @@ import pickle
 import h5py
 
 # Add local DeepMIMO to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'DeepMIMO'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'DeepMIMO'))
 import deepmimo as dm
 from collections import defaultdict
 from torch.utils.data import TensorDataset, DataLoader
@@ -1297,3 +1297,45 @@ def plot_radar_chart(task_names, optimized_scores, baseline_scores, title="Task 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight', transparent=False)
     plt.show()
+
+def subsample_training_data(train_data, sample_pct, seed=42, min_samples=1, task_idx=None):
+    """
+    Deterministically subsample training data.
+
+    Args:
+        train_data (dict): Dictionary with 'channels' and 'labels' tensors
+        sample_pct (float): Percentage of samples to keep (0.0-1.0)
+        seed (int): Random seed for reproducibility
+        min_samples (int): Minimum number of samples to keep
+        task_idx (int, optional): Task index (1-5) for special handling
+
+    Returns:
+        dict: Subsampled data with same structure as input
+        int: Number of samples kept
+    """
+    n_samples = train_data["channels"].shape[0]
+    n_keep = max(min_samples, int(n_samples * sample_pct))
+    n_keep = min(n_keep, n_samples)  # Don't exceed available samples
+
+    # Special handling for tasks with BatchNorm (tasks 1 and 2)
+    # BatchNorm requires at least 2 samples per batch
+    if task_idx in [1, 2] and n_keep < 2:
+        n_keep = min(2, n_samples)
+        print(f"  NOTE: Increased to {n_keep} samples (minimum for BatchNorm in task {task_idx})")
+
+    # Create deterministic random generator
+    rng = np.random.RandomState(seed)
+    indices = rng.permutation(n_samples)[:n_keep]
+    indices = np.sort(indices)  # Sort for better cache locality
+
+    # Subsample both channels and labels
+    subsampled_data = {
+        "channels": train_data["channels"][indices],
+        "labels": train_data["labels"][indices]
+    }
+
+    print(f"  Subsampled {n_samples} → {n_keep} samples ({sample_pct*100:.0f}%)")
+    if n_keep < 10:
+        print(f"  WARNING: Only {n_keep} training samples - results may be unstable")
+
+    return subsampled_data, n_keep
