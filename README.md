@@ -18,7 +18,6 @@ We extend the baseline LWM (Transformer) with:
 
 - **Mamba architecture** - A bidirectional selective state-space model as an alternative backbone, offering linear-time sequence processing
 - **Multi-resolution patching** - Support for multiple patch sizes (4x4, 6x6, 8x8) with resolution-specific embeddings, allowing the same backbone to handle different tokenization granularities
-- **Continued pretraining** - Adapt pretrained models to new patch sizes by freezing the backbone and retraining only the embedding layer
 
 ## Repository Structure
 
