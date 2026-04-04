@@ -1,8 +1,6 @@
 # WiMamba: Linear-Scale Wireless Foundation Model
 
-Official code for the paper **"WiMamba: Linear-Scale Wireless Foundation Model"**.
-
-This repository contains our solution for the [Large Wireless Models (LWM) 2025 Challenge](https://lwm-wireless.net/challenge), which aims to improve performance across five wireless downstream tasks by optimizing a baseline LWM foundation model.
+Official code for the paper [WiMamba: Linear-Scale Wireless Foundation Model](https://arxiv.org/abs/2603.26367)
 
 ## Tasks
 
@@ -95,13 +93,10 @@ Both models use `d_model=128`, `n_layers=12`, and support multi-resolution patch
 Based on the LWM foundation model:
 
 ```bibtex
-@misc{alikhani2025largewirelessmodellwm,
-      title={Large Wireless Model (LWM): A Foundation Model for Wireless Channels},
-      author={Sadjad Alikhani and Gouranga Charan and Ahmed Alkhateeb},
-      year={2025},
-      eprint={2411.08872},
-      archivePrefix={arXiv},
-      primaryClass={cs.IT},
-      url={https://arxiv.org/abs/2411.08872},
+@article{raviv2026wimamba,
+  title={WiMamba: Linear-Scale Wireless Foundation Model},
+  author={Raviv, Tomer and Shlezinger, Nir},
+  journal={arXiv preprint arXiv:2603.26367},
+  year={2026}
 }
 ```
