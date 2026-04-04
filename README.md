@@ -7,15 +7,15 @@ Official code for the paper [WiMamba: Linear-Scale Wireless Foundation Model](ht
 1. **LoS/NLoS Classification** - Binary classification of line-of-sight vs non-line-of-sight
 2. **Beam Prediction** - Sub-6 GHz channel to mmWave beam index prediction (64 beams)
 3. **Channel Interpolation** - Reconstruct missing channel values from partial observations
-4. **Channel Estimation** - Full channel reconstruction from noisy measurements
-5. **User Localization** - 2D position estimation from channel embeddings
+4. **User Localization** - 2D position estimation from channel embeddings
 
 ## Approach
 
-We extend the baseline LWM (Transformer) with:
+Our approach is based on:
 
-- **Mamba architecture** - A bidirectional selective state-space model as an alternative backbone, offering linear-time sequence processing
+- **Mamba architecture** - A selective state-space model as an alternative backbone, offering linear-time sequence processing
 - **Multi-resolution patching** - Support for multiple patch sizes (4x4, 6x6, 8x8) with resolution-specific embeddings, allowing the same backbone to handle different tokenization granularities
+- **Bidirectionality** - bidirectional Mamba backbone, accounting by the fact that the antenna–subcarrier ordering has no inherent temporal direction
 
 ## Repository Structure
 
@@ -56,7 +56,7 @@ pip install -e ./DeepMIMO
 
 ## Usage
 
-### Train and evaluate on all 5 tasks
+### Train and evaluate on all 4 tasks
 ```bash
 python scripts/train_heads.py
 ```
@@ -65,7 +65,7 @@ This loads a pretrained LWM, fine-tunes it jointly with task-specific heads, eva
 
 ### Configure model type
 Edit `MODEL_TYPE` in `scripts/train_heads.py`:
-- `"transformer"` - Transformer LWM (default)
+- `"transformer"` - Transformer LWM (baseline)
 - `"mamba"` - Mamba LWM
 - `"raw"` - Raw patch features (no pretrained model)
 
@@ -90,8 +90,6 @@ Both models use `d_model=128`, `n_layers=12`, and support multi-resolution patch
 
 ## Citation
 
-Based on the LWM foundation model:
-
 ```bibtex
 @article{raviv2026wimamba,
   title={WiMamba: Linear-Scale Wireless Foundation Model},
@@ -100,3 +98,5 @@ Based on the LWM foundation model:
   year={2026}
 }
 ```
+
+This repo is based on the LWM repo at [this link](https://huggingface.co/wi-lab/lwm-competition-2025).
