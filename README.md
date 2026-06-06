@@ -19,6 +19,42 @@ We extend the baseline LWM (Transformer) with:
 - **Mamba architecture** - A bidirectional selective state-space model as an alternative backbone, offering linear-time sequence processing
 - **Multi-resolution patching** - Support for multiple patch sizes (4x4, 6x6, 8x8) with resolution-specific embeddings, allowing the same backbone to handle different tokenization granularities
 
+## Spectrogram extension (WiMamba-Spectro)
+
+Beyond the DeepMIMO channel tasks, we port the same idea to a **second domain** — wireless
+baseband I/Q signals as **128×128 time-frequency spectrograms** — using
+[`wi-lab/lwm-spectro`](https://huggingface.co/wi-lab/lwm-spectro) (a per-protocol Transformer
+**Mixture-of-Experts**, LTE/WiFi/5G) as the baseline, and building a **Mamba MoE** counterpart.
+Downstream tasks: modulation, SNR, and mobility recognition. Code lives in `spectro/`
+(domain-agnostic blocks factored into `shared/`).
+
+**What we found:**
+
+- **The data is the bottleneck, not the architecture.** LWM-Spectro's full pretraining corpus
+  and its generator are *not public* — only a 10.5k-sample demo set (with precomputed baseline
+  embeddings) ships on the Hub. So we built our own.
+- **A synthetic OFDM spectrogram generator** (`spectro/datagen/`, built on
+  [NVIDIA Sionna](https://github.com/NVlabs/sionna) PHY: constellation mapping → OFDM → 3GPP TDL
+  fading with Doppler → AWGN → STFT). Per-protocol numerology makes the techs **94.7% separable**
+  by the router — i.e. the synthetic LTE/WiFi/5G are genuinely distinct.
+- **Synthetic pretraining transfers to the real tasks — for *both* backbones.** Pretraining on
+  ~10k synthetic spectrograms (masked-spectrogram modeling) then probing the **real** demo tasks
+  beats a random-initialized backbone on every task:
+
+  | Backbone | Modulation | SNR | Mobility |
+  |----------|-----------:|----:|---------:|
+  | Transformer | **+0.058** | **+0.169** | **+0.032** |
+  | Mamba | **+0.026** | **+0.081** | **+0.055** |
+
+  (accuracy gain, after − before, at full demo data). SNR gains are largest — the AWGN level is
+  directly imposed during generation. This confirms the synthetic data teaches task-relevant
+  features despite being approximate (numerology-based, not standard-compliant).
+- **Reproducible at scale.** `cluster/` provides an all-Slurm BGU-HPC workflow (env on the login
+  node, GPU jobs for generation + pretraining), and `spectro/scripts/hf_sync.py` keeps the
+  generated corpus and trained checkpoints in a Hugging Face account.
+
+See `spectro/README.md`, `spectro/datagen/PLAN.md`, and `cluster/README.md` for details.
+
 ## Repository Structure
 
 ```
@@ -40,6 +76,12 @@ lwm-competition-2025/
 │   └── pretrained_models/             # Model checkpoints
 │       ├── lwm_weights/               # Transformer LWM checkpoint
 │       └── mamba_weights/             # Mamba LWM checkpoint
+├── shared/                            # Domain-agnostic blocks (Mamba primitives, finetune harness)
+├── spectro/                           # Spectrogram domain (WiMamba-Spectro)
+│   ├── scripts/                       # patchify, data, Mamba MoE, pretrain, sweep, plot, hf_sync
+│   ├── datagen/                       # Sionna-based synthetic OFDM spectrogram generator
+│   └── README.md
+├── cluster/                           # BGU-HPC Slurm jobs + Hugging Face sync (config.env, *.sbatch)
 ├── task_1/ ... task_5/                # Competition task data (train/val/test splits)
 ├── data/                              # Raw channel data
 ├── DeepMIMO/                          # DeepMIMO ray-tracing framework
