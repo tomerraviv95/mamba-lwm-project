@@ -1,19 +1,30 @@
 #!/bin/bash
 # One-time environment setup for the BGU-HPC spectro pipeline.
 #
-# RUN THIS ON A GPU NODE (mamba-ssm compiles/links CUDA kernels):
-#     sinteractive --gpus=1 --constraint=rtx_3090
-#     module load anaconda
-#     module load cuda/12.4
-#     bash cluster/setup_env.sh
+# RUN THIS ON THE LOGIN NODE (it has internet; pip needs it). A GPU is NOT required to
+# *install* mamba-ssm — only to *run* it — so do NOT use a compute job for this.
 #
-# Pins the exact stack validated locally: torch 2.10 (cu128), sionna 2.0.1, mamba-ssm 2.3.0.
-# causal-conv1d is OPTIONAL (mamba-ssm runs without it; we omit it to match the validated env).
+#     ssh <bgu_user>@slurm.bgu.ac.il
+#     cd ~/lwm-competition-2025
+#     module load anaconda
+#     module load cuda/12.4            # provides nvcc IF mamba-ssm source-builds
+#     bash cluster/setup_env.sh
+#     conda deactivate                 # submit jobs with the env DEACTIVATED
+#
+# The env is created in shared home (~/.conda/envs/$ENV_NAME), so every later sbatch
+# job on any compute node sees it via `source activate $ENV_NAME`.
+#
+# Pins the stack validated locally: torch 2.10 (cu128), sionna 2.0.1, mamba-ssm 2.3.0.
+# causal-conv1d is OPTIONAL (mamba-ssm runs without it; omitted to match the validated env).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/config.env"
+
+# If mamba-ssm has no matching prebuilt wheel and source-builds, target the rtx_3090 arch
+# (Ampere = 8.6). Harmless when a wheel is used. Add 8.9 if you also run on rtx_4090.
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
 
 echo "Creating conda env '$ENV_NAME' (python $PYTHON_VERSION) ..."
 conda create -y -n "$ENV_NAME" "python=$PYTHON_VERSION"
@@ -30,21 +41,21 @@ pip install "numpy>=2.0" "scipy>=1.13" "matplotlib>=3.7" "huggingface_hub>=1.0" 
 echo "Installing Sionna PHY 2.x ..."
 pip install "sionna>=2.0"
 
-echo "Installing mamba-ssm 2.3.0 (needs a GPU node + 'module load cuda/12.4' if it builds) ..."
+echo "Installing mamba-ssm 2.3.0 (uses a wheel if available; else source-builds via nvcc) ..."
 pip install "mamba-ssm==2.3.0"
-# If the above tries to build and fails, retry after: export MAMBA_FORCE_BUILD=TRUE
-# (and ensure nvcc is on PATH via `module load cuda/12.4`).
 
 echo
-echo "Verifying imports on the allocated GPU ..."
+echo "Verifying CPU-safe imports on the login node (GPU is exercised later, in jobs) ..."
 python - <<'PY'
-import torch, sionna, mamba_ssm
-print("torch", torch.__version__, "cuda?", torch.cuda.is_available())
-from sionna.phy.channel.tr38901 import TDL  # noqa
-from mamba_ssm import Mamba  # noqa
-print("sionna", sionna.__version__, "mamba_ssm", mamba_ssm.__version__, "-> OK")
+import torch, sionna
+print("torch", torch.__version__, "| sionna", sionna.__version__)
+from sionna.phy.channel.tr38901 import TDL  # noqa  (CPU-safe import)
+import importlib.util
+print("mamba-ssm installed:", importlib.util.find_spec("mamba_ssm") is not None)
+print("NOTE: mamba_ssm import + CUDA run is validated by the first GPU job (02_pretrain).")
+print("-> setup OK")
 PY
 
 echo
-echo "Setup complete. Next: set your HF token (cluster/secrets.env) or run 'huggingface-cli login'."
-echo "Then submit jobs from the LOGIN node with the env DEACTIVATED:  conda deactivate"
+echo "Done. Set your HF token (cluster/secrets.env) or run 'huggingface-cli login',"
+echo "then 'conda deactivate' and submit jobs from the login node."
