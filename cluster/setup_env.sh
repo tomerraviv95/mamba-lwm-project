@@ -38,6 +38,17 @@ uv sync
 # (The module is only for building; torch's pip wheel bundles its own 12.8 runtime for execution.)
 module load cuda/12.4 || true
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
+
+# --- make the conda-forge host compiler available (no system g++ on this cluster) ---
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate mamba-build
+export CC=$(command -v x86_64-conda-linux-gnu-gcc)
+export CXX=$(command -v x86_64-conda-linux-gnu-g++)
+# nvcc needs to be told which host compiler to use
+export NVCC_PREPEND_FLAGS="-ccbin $CXX"
+echo "Using CC=$CC"
+echo "Using CXX=$CXX"
+
 echo "Building mamba-ssm 2.3.0 (--no-build-isolation) ..."
 uv pip install --no-build-isolation "mamba-ssm==2.3.0"
 
