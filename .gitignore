@@ -224,3 +224,7 @@ __marimo__/
 
 # Downloaded LWM-Spectro artifacts + source (reproducible via spectro/scripts/download_spectro_hf.py)
 spectro/hf_cache/
+
+# Cluster secrets + job logs
+cluster/secrets.env
+cluster/logs/*.out
