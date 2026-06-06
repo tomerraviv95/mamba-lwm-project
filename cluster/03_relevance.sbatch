@@ -19,18 +19,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/config.env"
 
-module load anaconda
-source activate "$ENV_NAME"
+export PATH="$HOME/.local/bin:$PATH"     # uv
 module load cuda/12.4 || true
 export PYTHONUNBUFFERED=TRUE
+cd "$REPO_ROOT"
 
 echo "GPU:"; nvidia-smi -L
 if [ ! -f "$DATA_DIR/manifest.json" ]; then
-    python "$REPO_ROOT/spectro/scripts/hf_sync.py" pull-dataset --repo "$HF_DATASET_REPO" --dir "$DATA_DIR"
+    echo "ERROR: no corpus at $DATA_DIR (run 01_gen_data first)." >&2; exit 1
 fi
 
 # Transformer attention is O(seq^2) at seq=1025 -> keep batches small (<=16).
-python "$REPO_ROOT/spectro/scripts/spectro_relevance_experiment.py" \
+uv run --no-sync python spectro/scripts/spectro_relevance_experiment.py \
     --n-layers "$N_LAYERS" \
     --pretrain-epochs "$PRETRAIN_EPOCHS" \
     --pretrain-batch "$PRETRAIN_BATCH" \

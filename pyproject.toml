@@ -1,0 +1,38 @@
+[project]
+name = "lwm-spectro"
+version = "0.1.0"
+description = "WiMamba-Spectro: spectrogram-domain Mamba MoE + synthetic OFDM data generation"
+requires-python = ">=3.11,<3.13"
+
+# NOTE: mamba-ssm is intentionally NOT listed here. It has dynamic metadata and imports torch
+# in setup.py, which breaks uv's isolated build during `uv lock`/`uv sync`. It is installed as a
+# --no-build-isolation step right after `uv sync` (see cluster/setup_env.sh), with torch + the
+# build deps (setuptools/wheel/ninja/packaging) already present in the synced env.
+dependencies = [
+    "torch==2.10.0",
+    "sionna>=2.0",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "matplotlib>=3.7",
+    "huggingface-hub>=1.0",
+    "scikit-learn>=1.3",
+    "tqdm>=4.65",
+    # build backend for the post-sync mamba-ssm build (--no-build-isolation):
+    "setuptools>=68",
+    "wheel",
+    "ninja",
+    "packaging",
+]
+
+# Pull torch from the CUDA 12.8 wheel index (matches the validated stack).
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.setuptools]
+# This repo is a collection of scripts, not an importable package; don't auto-discover packages.
+py-modules = []

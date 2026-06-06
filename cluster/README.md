@@ -26,16 +26,17 @@ git checkout feat/spectograms
 cp cluster/secrets.env.example cluster/secrets.env   # then edit: HF_TOKEN=hf_...
 # (HF_USER is already set to tomerraviv95 in cluster/config.env)
 
-# build the env ON THE LOGIN NODE (pip needs internet; a GPU is NOT needed to install)
-module load anaconda
-module load cuda/12.4                                 # nvcc, in case mamba-ssm source-builds
-bash cluster/setup_env.sh                             # ends with "-> setup OK"
-conda deactivate                                      # submit jobs with the env deactivated
+# build the env ON THE LOGIN NODE (uv needs internet; a GPU is NOT needed to install)
+bash cluster/setup_env.sh                             # uv sync + mamba-ssm build; ends "-> setup OK"
 mkdir -p cluster/logs
 ```
 
+`setup_env.sh` bootstraps `uv` if missing, runs `uv sync` (reproducible env from `uv.lock` at
+`$REPO_ROOT/.venv`), then builds `mamba-ssm` with `--no-build-isolation`.
+
 > No `sinteractive` needed. Env setup is a plain login-node command (not a job); the GPU work
-> (gen / pretrain / relevance) is all `sbatch`. The env lives in shared home, so every job sees it.
+> (gen / pretrain / relevance) is all `sbatch`, run via `uv run --no-sync` (no network on
+> compute nodes). The `.venv` lives in shared home, so every job sees it.
 
 Pinned stack (validated locally): torch 2.10 cu128, sionna 2.0.1, mamba-ssm 2.3.0, py3.12.
 `causal-conv1d` is intentionally omitted (mamba-ssm runs without it).
@@ -73,6 +74,10 @@ python spectro/scripts/hf_sync.py pull-ckpts   --repo <user>/wimamba-spectro-ckp
 
 ## Notes / gotchas
 - **GPU**: jobs constrain to `rtx_3090` (Ampere). mamba-ssm will **not** run on `gtx_1080`.
+- **CUDA module = `cuda/12.4`, not `cuda/13`.** It's only used to build mamba-ssm; torch's wheel
+  bundles its own CUDA 12.8 runtime. 12.4 shares torch's major (12) so the build just warns; CUDA
+  13 is a major mismatch and the build fails. The cluster driver (new enough for a CUDA-13 module)
+  runs torch's bundled 12.8 fine.
 - Submit jobs with your conda env **deactivated** (`conda deactivate`).
 - If a compute node *does* have internet you can skip `push_to_hf.sh` and add a pull/push call
   inside the sbatch scripts — but the login-node split is the safe default.

@@ -11,8 +11,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/config.env"
 
-module load anaconda 2>/dev/null || true
-source activate "$ENV_NAME" 2>/dev/null || true
+export PATH="$HOME/.local/bin:$PATH"     # uv
+cd "$REPO_ROOT"
 
 WHAT="${1:-all}"
 PRIV=""; [ "${HF_PRIVATE:-1}" = "1" ] && PRIV="--private"
@@ -22,11 +22,11 @@ if [ "$HF_USER" = "CHANGE_ME" ]; then
 fi
 
 if [ "$WHAT" = "dataset" ] || [ "$WHAT" = "all" ]; then
-    python "$REPO_ROOT/spectro/scripts/hf_sync.py" push-dataset \
+    uv run --no-sync python spectro/scripts/hf_sync.py push-dataset \
         --repo "$HF_DATASET_REPO" --dir "$DATA_DIR" $PRIV
 fi
 if [ "$WHAT" = "ckpts" ] || [ "$WHAT" = "all" ]; then
-    python "$REPO_ROOT/spectro/scripts/hf_sync.py" push-ckpts \
+    uv run --no-sync python spectro/scripts/hf_sync.py push-ckpts \
         --repo "$HF_MODEL_REPO" --dir "$CKPT_DIR" $PRIV
 fi
 echo "Published: $WHAT"

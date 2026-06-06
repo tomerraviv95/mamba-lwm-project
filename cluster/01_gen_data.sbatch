@@ -20,16 +20,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/config.env"
 
-module load anaconda
-source activate "$ENV_NAME"
+export PATH="$HOME/.local/bin:$PATH"     # uv
 module load cuda/12.4 || true
 export PYTHONUNBUFFERED=TRUE
+cd "$REPO_ROOT"
 
 echo "GPU:"; nvidia-smi -L
 echo "Generating ~$((315 * PER_COMBO)) samples (per-combo=$PER_COMBO) -> $DATA_DIR"
 
 # Generation uses the single allocated GPU as cuda:0 (Slurm masks the rest).
-python "$REPO_ROOT/spectro/datagen/generate.py" \
+uv run --no-sync python spectro/datagen/generate.py \
     --per-combo "$PER_COMBO" \
     --batch "$GEN_BATCH" \
     --seed "$SEED" \
