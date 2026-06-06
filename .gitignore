@@ -221,3 +221,6 @@ __marimo__/
 *.pt
 *.json
 *.png
+
+# Downloaded LWM-Spectro artifacts + source (reproducible via spectro/scripts/download_spectro_hf.py)
+spectro/hf_cache/

@@ -20,5 +20,12 @@ psutil>=5.9.0
 # Mamba SSM (State Space Model)
 mamba-ssm>=1.0.0
 
+# Hugging Face Hub (download LWM-Spectro baseline + demo data for spectro/ pipeline)
+huggingface_hub>=0.20.0
+
+# Sionna PHY: OFDM/modulation/channel blocks for spectro/datagen synthetic generator
+# (optional; only needed to generate synthetic pretraining spectrograms — needs PyTorch >= 2.9)
+sionna>=2.0
+
 # DeepMIMO (local package in ./DeepMIMO directory)
 # Install with: pip install -e ./DeepMIMO
