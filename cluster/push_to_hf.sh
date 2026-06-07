@@ -9,7 +9,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$HERE/config.env"
+source "$HOME/lwm-competition-2025/cluster/config.env"
 
 export PATH="$HOME/.local/bin:$PATH"     # uv
 cd "$REPO_ROOT"

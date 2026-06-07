@@ -52,12 +52,40 @@ echo "Using CXX=$CXX"
 echo "Building mamba-ssm 2.3.0 (--no-build-isolation) ..."
 uv pip install --no-build-isolation "mamba-ssm==2.3.0"
 
+# --- Dr.Jit/Mitsuba LLVM backend so `import sionna` works on ANY node ---------------------
+# Sionna's top-level import eagerly loads sionna.rt -> Mitsuba/Dr.Jit, which needs libLLVM.so
+# even though this pipeline only uses sionna.phy. The GPU-less login node (and any CUDA-init
+# hiccup in a job) needs the LLVM fallback. Install libLLVM into the conda build env and pin
+# DRJIT_LIBLLVM_PATH to it (Dr.Jit accepts LLVM 14-19), persisting it for every sbatch job.
+echo "Installing libLLVM (conda-forge) for Dr.Jit's LLVM backend ..."
+# mamba-build is the currently-activated env (above), so $CONDA_PREFIX points at it.
+conda install -n mamba-build -c conda-forge -y llvmdev >/dev/null
+LLVM_LIB="$CONDA_PREFIX/lib/libLLVM.so"
+if [ ! -e "$LLVM_LIB" ]; then
+  LLVM_LIB="$(ls "$CONDA_PREFIX"/lib/libLLVM*.so* 2>/dev/null | head -n1 || true)"
+fi
+if [ -z "$LLVM_LIB" ] || [ ! -e "$LLVM_LIB" ]; then
+  echo "WARNING: could not locate libLLVM.so after install; sionna import may fail on CPU nodes." >&2
+else
+  export DRJIT_LIBLLVM_PATH="$LLVM_LIB"
+  echo "DRJIT_LIBLLVM_PATH=$DRJIT_LIBLLVM_PATH"
+  # Persist for every sbatch job (config.env sources secrets.env). Idempotent: drop any prior
+  # line first, then append the resolved absolute path.
+  SECRETS="$HERE/secrets.env"
+  touch "$SECRETS"
+  grep -v '^export DRJIT_LIBLLVM_PATH=' "$SECRETS" > "$SECRETS.tmp" 2>/dev/null || true
+  mv "$SECRETS.tmp" "$SECRETS"
+  echo "export DRJIT_LIBLLVM_PATH=\"$DRJIT_LIBLLVM_PATH\"" >> "$SECRETS"
+fi
+
 echo
 echo "Verifying CPU-safe imports (GPU is exercised later, in jobs) ..."
 uv run --no-sync python - <<'PY'
-import torch, sionna, importlib.util
+import os, importlib.util, torch
+print("DRJIT_LIBLLVM_PATH:", os.environ.get("DRJIT_LIBLLVM_PATH", "<unset>"))
+import sionna  # triggers sionna.rt -> Mitsuba/Dr.Jit; needs the LLVM backend on a CPU node
 print("torch", torch.__version__, "| sionna", sionna.__version__)
-from sionna.phy.channel.tr38901 import TDL  # noqa  (CPU-safe import)
+from sionna.phy.channel.tr38901 import TDL  # noqa  (the PHY bits the pipeline actually uses)
 print("mamba-ssm installed:", importlib.util.find_spec("mamba_ssm") is not None)
 print("NOTE: mamba_ssm import + CUDA run is validated by the first GPU job (02_pretrain).")
 print("-> setup OK")

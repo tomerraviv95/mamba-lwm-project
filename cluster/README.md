@@ -79,6 +79,13 @@ python spectro/scripts/hf_sync.py pull-ckpts   --repo <user>/wimamba-spectro-ckp
   13 is a major mismatch and the build fails. The cluster driver (new enough for a CUDA-13 module)
   runs torch's bundled 12.8 fine.
 - Submit jobs with your conda env **deactivated** (`conda deactivate`).
+- **`import sionna` needs an LLVM backend.** Sionna's top-level import loads `sionna.rt`
+  (Mitsuba/Dr.Jit), which needs `libLLVM.so` even though we only use `sionna.phy`. `setup_env.sh`
+  installs `libLLVM` (conda-forge `llvmdev`) and persists `DRJIT_LIBLLVM_PATH` into
+  `cluster/secrets.env`; `config.env` also probes the conda build env as a fallback. Symptom if
+  missing: `jit_init_thread_state(): the LLVM backend is inactive ... libLLVM.so could not be
+  found` — most visible on the GPU-less login node, but it can also kill a GPU job. Re-run
+  `bash cluster/setup_env.sh` if you see it.
 - If a compute node *does* have internet you can skip `push_to_hf.sh` and add a pull/push call
   inside the sbatch scripts — but the login-node split is the safe default.
 - Large corpus is ~5 GB; it lives under `spectro/outputs/synthetic` (gitignored). For heavy I/O
