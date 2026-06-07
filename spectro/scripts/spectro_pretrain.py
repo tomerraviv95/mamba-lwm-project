@@ -38,7 +38,7 @@ _WEIGHTS_DIR = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models
 
 
 def pretrain_expert(specs: torch.Tensor, *, d_model, n_layers, mask_percent, epochs, lr,
-                    batch_size, device, seed, val_frac=0.1, patience=4):
+                    batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0):
     """Masked-spectrogram-modeling pretraining of one Mamba expert. Returns best state_dict."""
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
     n = ids.shape[0]
@@ -67,6 +67,8 @@ def pretrain_expert(specs: torch.Tensor, *, d_model, n_layers, mask_percent, epo
             logits = model(b_ids, b_pos)[0]
             loss = criterion(b_toks, logits)
             loss.backward()
+            if grad_clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             opt.step()
             tr_loss += loss.item(); tr_n += b_ids.shape[0]
         sched.step()
@@ -161,6 +163,8 @@ def main():
     ap.add_argument('--router-epochs', type=int, default=15)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--batch-size', type=int, default=32)
+    ap.add_argument('--grad-clip', type=float, default=1.0,
+                    help='max grad norm (0 disables); guards against late-training MSE spikes')
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--smoke', action='store_true', help='tiny fast run for sanity checks')
     ap.add_argument('--data', choices=['demo', 'synthetic', 'mixed'], default='demo',
@@ -189,7 +193,7 @@ def main():
         state, val = pretrain_expert(
             specs, d_model=args.d_model, n_layers=args.n_layers,
             mask_percent=args.mask_percent, epochs=args.epochs, lr=args.lr,
-            batch_size=args.batch_size, device=device, seed=args.seed)
+            batch_size=args.batch_size, device=device, seed=args.seed, grad_clip=args.grad_clip)
         path = os.path.join(_WEIGHTS_DIR, f"{proto}_expert.pth")
         torch.save({'state_dict': state, 'val_mse': val, 'd_model': args.d_model,
                     'n_layers': args.n_layers}, path)
