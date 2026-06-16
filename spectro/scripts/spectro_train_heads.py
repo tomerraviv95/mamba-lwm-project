@@ -1,10 +1,14 @@
 """Main entry point: extract per-arm spectrogram features and run the sample-variation sweep.
 
 Arms (``--arm``):
-- ``transformer``: LWM-Spectro MoE baseline — precomputed ``moe_embedding`` (128-d).
-- ``mamba``: our pretrained Mamba MoE — routed embeddings (128-d). Requires
-  ``spectro/outputs/pretrained_models/spectro_mamba_weights/`` (run spectro_pretrain.py first).
+- ``transformer``: LWM-Spectro MoE *baseline* — precomputed ``moe_embedding`` (real full corpus).
+- ``transformer_synth``: our Transformer MoE pretrained on the synthetic corpus (fair vs mamba).
+- ``mamba``: our Mamba MoE pretrained on the synthetic corpus — routed embeddings (128-d).
 - ``raw``: no backbone — mean-pooled raw 4x4 patches (16-d) as a lower bound.
+
+``transformer_synth`` and ``mamba`` are the *fair* backbone comparison (same data, same
+extraction); ``transformer`` is the strong real-corpus reference. Each synth arm needs its
+checkpoints from ``spectro_pretrain.py --arch {transformer,mamba}``.
 
 Each arm produces a (N, d) feature matrix once, then ``spectro_sweep.run_sweep`` trains a head
 per (task, sample-percentage) and writes
@@ -21,14 +25,20 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spectro_data import PROTOCOLS, load_spectro_data  # noqa: E402
-from spectro_moe import MambaMoE  # noqa: E402
+from spectro_moe import SpectroMoE  # noqa: E402
 from spectro_patchify import spectrogram_patchify  # noqa: E402
 from spectro_sweep import run_sweep  # noqa: E402
 from spectro_transformer_model import get_baseline_features  # noqa: E402
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-_WEIGHTS_DIR = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models', 'spectro_mamba_weights')
+_PRETRAINED = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models')
 _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
+
+# arm -> (architecture, weights subdir) for the synthetic-pretrained MoE arms
+_MOE_ARMS = {
+    'mamba': ('mamba', 'spectro_mamba_weights'),
+    'transformer_synth': ('transformer', 'spectro_transformer_weights'),
+}
 
 
 def _raw_features(data) -> torch.Tensor:
@@ -37,18 +47,22 @@ def _raw_features(data) -> torch.Tensor:
     return torch.tensor(patches.mean(axis=1), dtype=torch.float32)
 
 
-def _mamba_features(data, device, routing) -> torch.Tensor:
-    """Load the pretrained Mamba MoE and extract routed embeddings -> (N, d_model)."""
-    router_ckpt = torch.load(os.path.join(_WEIGHTS_DIR, 'router.pth'), map_location='cpu',
-                             weights_only=False)
-    sample_expert = torch.load(os.path.join(_WEIGHTS_DIR, f'{PROTOCOLS[0]}_expert.pth'),
+def _moe_features(data, device, routing, arch, weights_subdir) -> torch.Tensor:
+    """Load a pretrained MoE (Mamba or Transformer) and extract routed embeddings -> (N, d_model)."""
+    wdir = os.path.join(_PRETRAINED, weights_subdir)
+    if not os.path.exists(os.path.join(wdir, 'router.pth')):
+        raise FileNotFoundError(
+            f"No checkpoints in {wdir}. Run: python spectro/scripts/spectro_pretrain.py "
+            f"--data synthetic --arch {arch}")
+    router_ckpt = torch.load(os.path.join(wdir, 'router.pth'), map_location='cpu', weights_only=False)
+    sample_expert = torch.load(os.path.join(wdir, f'{PROTOCOLS[0]}_expert.pth'),
                                map_location='cpu', weights_only=False)
     d_model = sample_expert.get('d_model', 128)
     n_layers = sample_expert.get('n_layers', 12)
 
-    moe = MambaMoE(PROTOCOLS, d_model=d_model, n_layers=n_layers)
+    moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers)
     for proto in PROTOCOLS:
-        ckpt = torch.load(os.path.join(_WEIGHTS_DIR, f'{proto}_expert.pth'),
+        ckpt = torch.load(os.path.join(wdir, f'{proto}_expert.pth'),
                           map_location='cpu', weights_only=False)
         moe.load_expert(proto, ckpt['state_dict'])
     moe.router.load_state_dict(router_ckpt['state_dict'])
@@ -59,11 +73,11 @@ def _mamba_features(data, device, routing) -> torch.Tensor:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--arm', choices=['transformer', 'mamba', 'raw'], required=True)
+    ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw'], required=True)
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
-                    help='Mamba-arm routing strategy.')
+                    help='routing strategy for the synthetic-pretrained MoE arms.')
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
-                    help='Transformer-arm precomputed embedding to use.')
+                    help='Transformer-baseline precomputed embedding to use.')
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     args = ap.parse_args()
@@ -74,8 +88,9 @@ def main():
     print(f"Extracting features for arm={args.arm} ...")
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
-    elif args.arm == 'mamba':
-        features = _mamba_features(data, device, args.routing)
+    elif args.arm in _MOE_ARMS:
+        arch, weights_subdir = _MOE_ARMS[args.arm]
+        features = _moe_features(data, device, args.routing, arch, weights_subdir)
     else:
         features = _raw_features(data)
     print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")

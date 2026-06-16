@@ -1,19 +1,17 @@
-"""Pretrain the Mamba MoE on the LWM-Spectro demo spectrograms.
+"""Pretrain a spectrogram MoE (Mamba or Transformer experts) on LWM-Spectro spectrograms.
 
 Two stages, mirroring LWM-Spectro:
 1. Per-protocol expert pretraining via masked-spectrogram modeling (MSE on masked patches),
-   each expert trained only on its protocol subset of the (train split of the) demo data.
+   each expert trained only on its protocol subset of the chosen corpus.
 2. Router training: a CNN that classifies the protocol from the raw spectrogram (the experts
    stay frozen; routing is learned as protocol prediction, matching the HF router objective).
 
-Checkpoints are saved to ``spectro/outputs/pretrained_models/spectro_mamba_weights/``.
-
-NOTE: only the ~10.5k demo spectrograms are available (no full corpus), so each expert sees
-~2.4k training spectrograms. This is a small-data foundation model; see spectro/README.md.
+Checkpoints are saved to ``spectro/outputs/pretrained_models/spectro_{arch}_weights/``.
 
 Usage::
 
-    python spectro/scripts/spectro_pretrain.py                 # full run
+    python spectro/scripts/spectro_pretrain.py --data synthetic --arch mamba
+    python spectro/scripts/spectro_pretrain.py --data synthetic --arch transformer
     python spectro/scripts/spectro_pretrain.py --smoke         # tiny/fast sanity run
 """
 from __future__ import annotations
@@ -28,18 +26,21 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from spectro_backbones import build_expert  # noqa: E402
 from spectro_data import PROTOCOLS, load_spectro_data, load_synthetic_data  # noqa: E402
-from spectro_mamba_model import lwm_mamba_spectro  # noqa: E402
 from spectro_moe import RouterNet, _normalize_per_sample  # noqa: E402
 from spectro_patchify import build_masked_tensors  # noqa: E402
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-_WEIGHTS_DIR = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models', 'spectro_mamba_weights')
 
 
-def pretrain_expert(specs: torch.Tensor, *, d_model, n_layers, mask_percent, epochs, lr,
+def weights_dir(arch: str) -> str:
+    return os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models', f'spectro_{arch}_weights')
+
+
+def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percent, epochs, lr,
                     batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0):
-    """Masked-spectrogram-modeling pretraining of one Mamba expert. Returns best state_dict."""
+    """Masked-spectrogram-modeling pretraining of one expert (``arch``). Returns best state_dict."""
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
     n = ids.shape[0]
     rng = np.random.RandomState(seed)
@@ -52,7 +53,7 @@ def pretrain_expert(specs: torch.Tensor, *, d_model, n_layers, mask_percent, epo
     val_loader = DataLoader(TensorDataset(ids[val_i], toks[val_i], pos[val_i]),
                             batch_size=batch_size, shuffle=False)
 
-    model = lwm_mamba_spectro(d_model=d_model, n_layers=n_layers).to(device)
+    model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
     criterion = nn.MSELoss(reduction='sum')
@@ -166,6 +167,8 @@ def main():
     ap.add_argument('--grad-clip', type=float, default=1.0,
                     help='max grad norm (0 disables); guards against late-training MSE spikes')
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--arch', choices=['mamba', 'transformer'], default='mamba',
+                    help='expert architecture to pretrain (weights -> spectro_{arch}_weights/)')
     ap.add_argument('--smoke', action='store_true', help='tiny fast run for sanity checks')
     ap.add_argument('--data', choices=['demo', 'synthetic', 'mixed'], default='demo',
                     help="pretraining corpus: demo_data, the synthetic corpus, or both.")
@@ -177,12 +180,13 @@ def main():
         args.n_layers, args.epochs, args.router_epochs = 2, 2, 2
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    os.makedirs(_WEIGHTS_DIR, exist_ok=True)
+    out_dir = weights_dir(args.arch)
+    os.makedirs(out_dir, exist_ok=True)
 
     # Build the pretraining pool (spectrograms + protocol) per the chosen data source.
     pool_specs, pool_proto = _build_pool(args)
 
-    print(f"Pretraining Mamba experts on device={device} (data={args.data}, "
+    print(f"Pretraining {args.arch} experts on device={device} (data={args.data}, "
           f"n_layers={args.n_layers}, mask={args.mask_percent}, epochs={args.epochs})")
     for p_idx, proto in enumerate(PROTOCOLS):
         sel = pool_proto == p_idx
@@ -191,12 +195,12 @@ def main():
         if args.smoke:
             specs = specs[:64]
         state, val = pretrain_expert(
-            specs, d_model=args.d_model, n_layers=args.n_layers,
+            specs, arch=args.arch, d_model=args.d_model, n_layers=args.n_layers,
             mask_percent=args.mask_percent, epochs=args.epochs, lr=args.lr,
             batch_size=args.batch_size, device=device, seed=args.seed, grad_clip=args.grad_clip)
-        path = os.path.join(_WEIGHTS_DIR, f"{proto}_expert.pth")
-        torch.save({'state_dict': state, 'val_mse': val, 'd_model': args.d_model,
-                    'n_layers': args.n_layers}, path)
+        path = os.path.join(out_dir, f"{proto}_expert.pth")
+        torch.save({'state_dict': state, 'val_mse': val, 'arch': args.arch,
+                    'd_model': args.d_model, 'n_layers': args.n_layers}, path)
         print(f"[Expert {proto}] saved -> {path} (val_mse={val:.4f})")
 
     print("\n[Router] training protocol router")
@@ -206,10 +210,10 @@ def main():
         specs, proto = specs[:192], proto[:192]
     r_state, r_acc = train_router(specs, proto, epochs=args.router_epochs, lr=1e-3,
                                   batch_size=args.batch_size, device=device, seed=args.seed)
-    r_path = os.path.join(_WEIGHTS_DIR, 'router.pth')
+    r_path = os.path.join(out_dir, 'router.pth')
     torch.save({'state_dict': r_state, 'val_acc': r_acc, 'protocols': PROTOCOLS}, r_path)
     print(f"[Router] saved -> {r_path} (val_acc={r_acc:.3f})")
-    print("\nDone. Pretrained Mamba MoE weights in", _WEIGHTS_DIR)
+    print(f"\nDone. Pretrained {args.arch} MoE weights in", out_dir)
 
 
 if __name__ == '__main__':

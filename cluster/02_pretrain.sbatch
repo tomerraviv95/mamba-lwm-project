@@ -1,11 +1,12 @@
 #!/bin/bash
 ################################################################################
-# Phase 2: pretrain the Mamba MoE on the synthetic corpus (masked-spectrogram).
-# Reads $DATA_DIR, writes checkpoints to $CKPT_DIR/spectro_mamba_weights.
+# Phase 2: pretrain a spectrogram MoE on the synthetic corpus (masked-spectrogram).
+# Reads $DATA_DIR, writes checkpoints to $CKPT_DIR/spectro_${ARCH}_weights.
 #
-# Chain after generation:
+# Architecture via ARCH env (default mamba). Run once per backbone:
 #     gid=$(sbatch --parsable cluster/01_gen_data.sbatch)
-#     sbatch --dependency=afterok:$gid cluster/02_pretrain.sbatch
+#     sbatch --dependency=afterok:$gid --export=ALL,ARCH=mamba       cluster/02_pretrain.sbatch
+#     sbatch --dependency=afterok:$gid --export=ALL,ARCH=transformer cluster/02_pretrain.sbatch
 ################################################################################
 #SBATCH --partition main
 #SBATCH --time 1-00:00:00
@@ -34,8 +35,10 @@ if [ ! -f "$DATA_DIR/manifest.json" ]; then
     exit 1
 fi
 
-echo "Pretraining Mamba MoE (n_layers=$N_LAYERS, epochs=$PRETRAIN_EPOCHS) on synthetic ..."
+ARCH="${ARCH:-mamba}"     # mamba | transformer  (override: sbatch --export=ALL,ARCH=transformer ...)
+echo "Pretraining $ARCH MoE (n_layers=$N_LAYERS, epochs=$PRETRAIN_EPOCHS) on synthetic ..."
 uv run --no-sync python spectro/scripts/spectro_pretrain.py \
+    --arch "$ARCH" \
     --data synthetic \
     --synthetic-dir "$DATA_DIR" \
     --n-layers "$N_LAYERS" \
@@ -45,5 +48,5 @@ uv run --no-sync python spectro/scripts/spectro_pretrain.py \
     --batch-size "$PRETRAIN_BATCH" \
     --seed "$SEED"
 
-echo "Done. Checkpoints in $CKPT_DIR/spectro_mamba_weights."
+echo "Done. Checkpoints in $CKPT_DIR/spectro_${ARCH}_weights."
 echo "Publish them with:  bash cluster/push_to_hf.sh ckpts   # run on the LOGIN node"

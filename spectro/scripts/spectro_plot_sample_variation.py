@@ -19,9 +19,10 @@ _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
 _PLOTS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'plots')
 
 ARMS = [
-    ('transformer', 'LWM-Spectro (Transformer MoE)', '#1f77b4', '-', 'o'),
-    ('mamba',       'WiMamba MoE',                    '#d62728', '--', 's'),
-    ('raw',         'Raw patches',                    '#7f7f7f', ':', '^'),
+    ('transformer',       'LWM-Spectro baseline (real-corpus Transformer MoE)', '#1f77b4', '-',  'o'),
+    ('transformer_synth', 'Transformer MoE (synthetic-pretrained)',            '#2ca02c', '-.', 'D'),
+    ('mamba',             'WiMamba MoE (synthetic-pretrained)',                '#d62728', '--', 's'),
+    ('raw',               'Raw patches',                                       '#7f7f7f', ':',  '^'),
 ]
 TASKS = [('task_modulation', 'Modulation'), ('task_snr', 'SNR'), ('task_mobility', 'Mobility')]
 

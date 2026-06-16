@@ -1,7 +1,7 @@
-"""Mamba Mixture-of-Experts: per-protocol Mamba experts + a CNN router.
+"""Spectrogram Mixture-of-Experts: per-protocol experts (Mamba or Transformer) + a CNN router.
 
 Mirrors LWM-Spectro's MoE structure (``spectro/hf_cache/mixture/train_embedding_router.py``):
-- one bidirectional Mamba expert per protocol (LTE/WiFi/5G),
+- one expert per protocol (LTE/WiFi/5G), of a chosen architecture (``arch`` in {mamba, transformer}),
 - a lightweight CNN ``RouterNet`` that selects the expert from the raw spectrogram (top-1).
 
 ``extract_embeddings`` produces a (N, d_model) routed embedding matrix for downstream probing,
@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
-from spectro_mamba_model import lwm_mamba_spectro  # noqa: E402
+from spectro_backbones import build_expert  # noqa: E402
 from spectro_patchify import spectrogram_patchify  # noqa: E402
 
 
@@ -59,17 +59,18 @@ def _normalize_per_sample(specs: torch.Tensor) -> torch.Tensor:
     return (specs - mean) / std
 
 
-class MambaMoE(nn.Module):
-    """Per-protocol Mamba experts + a router; produces routed spectrogram embeddings."""
+class SpectroMoE(nn.Module):
+    """Per-protocol experts (``arch``) + a router; produces routed spectrogram embeddings."""
 
     def __init__(self, protocols: List[str], d_model: int = 128, pool: str = "mean",
-                 **expert_kwargs):
+                 arch: str = "mamba", **expert_kwargs):
         super().__init__()
         self.protocols = list(protocols)
         self.d_model = d_model
         self.pool = pool
+        self.arch = arch
         self.experts = nn.ModuleDict({
-            p: lwm_mamba_spectro(d_model=d_model, **expert_kwargs) for p in self.protocols
+            p: build_expert(arch, d_model=d_model, **expert_kwargs) for p in self.protocols
         })
         self.router = RouterNet(num_experts=len(self.protocols))
 
@@ -122,3 +123,7 @@ class MambaMoE(nn.Module):
                 emb = self._expert_embed(proto, batch[mask])
                 out[torch.arange(start, start + batch.shape[0])[mask.cpu()]] = emb.cpu().float()
         return out
+
+
+# Backward-compatible alias (the MoE now holds Mamba *or* Transformer experts).
+MambaMoE = SpectroMoE

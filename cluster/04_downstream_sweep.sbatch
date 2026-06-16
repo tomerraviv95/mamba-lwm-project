@@ -1,7 +1,10 @@
 #!/bin/bash
 ################################################################################
-# Phase 4: downstream sample-variation sweep on the REAL demo tasks, using the
-# pretrained Mamba MoE (experts + router) vs the Transformer-MoE baseline vs raw.
+# Phase 4: downstream sample-variation sweep on the REAL demo tasks. Arms:
+#   transformer        - LWM-Spectro baseline (precomputed real-corpus embeddings)
+#   transformer_synth  - our Transformer MoE pretrained on synthetic   (needs ARCH=transformer pretrain)
+#   mamba              - our Mamba MoE pretrained on synthetic          (needs ARCH=mamba pretrain)
+#   raw                - mean-pooled patches (floor)
 # Produces spectro/outputs/plots/spectro_performance_vs_samples.png.
 #
 # Needs the real demo_data.pt (with precomputed baseline embeddings). Download it
@@ -36,7 +39,9 @@ if [ ! -f "$REPO_ROOT/spectro/hf_cache/demo_data.pt" ]; then
     exit 1
 fi
 
-for arm in transformer mamba raw; do
+# Arms to run; override with: sbatch --export=ALL,ARMS="transformer mamba raw" ...
+ARMS="${ARMS:-transformer transformer_synth mamba raw}"
+for arm in $ARMS; do
     echo "===== arm: $arm ====="
     uv run --no-sync python spectro/scripts/spectro_train_heads.py --arm "$arm" --seed "$SEED"
 done
