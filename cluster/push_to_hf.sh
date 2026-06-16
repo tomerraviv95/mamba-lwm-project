@@ -3,9 +3,10 @@
 # RUN ON THE LOGIN NODE (it has internet; compute nodes may not). Needs a WRITE token
 # (cluster/secrets.env or a prior `huggingface-cli login`).
 #
-#     bash cluster/push_to_hf.sh dataset    # upload the synthetic corpus
-#     bash cluster/push_to_hf.sh ckpts      # upload the pretrained checkpoints
-#     bash cluster/push_to_hf.sh all        # both
+#     bash cluster/push_to_hf.sh dataset    # upload the synthetic spectrogram corpus
+#     bash cluster/push_to_hf.sh ckpts      # upload the spectro MoE checkpoints
+#     bash cluster/push_to_hf.sh channel    # upload the channel-domain LWM checkpoints
+#     bash cluster/push_to_hf.sh all        # dataset + spectro ckpts (not channel)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -28,5 +29,9 @@ fi
 if [ "$WHAT" = "ckpts" ] || [ "$WHAT" = "all" ]; then
     uv run --no-sync python spectro/scripts/hf_sync.py push-ckpts \
         --repo "$HF_MODEL_REPO" --dir "$CKPT_DIR" $PRIV
+fi
+if [ "$WHAT" = "channel" ]; then
+    uv run --no-sync python spectro/scripts/hf_sync.py push-ckpts \
+        --repo "$HF_CHANNEL_REPO" --dir "$CHANNEL_CKPT_DIR" $PRIV
 fi
 echo "Published: $WHAT"
