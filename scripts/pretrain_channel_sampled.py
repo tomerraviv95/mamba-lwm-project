@@ -55,7 +55,8 @@ CITY_CONFIG = [
     ("city_16_sanfrancisco_3p5_lwm", 64, 64),("city_17_seattle_3p5_lwm", 64, 128),
     ("city_18_denver_3p5_lwm", 128, 32),  ("city_19_oklahoma_3p5_lwm", 128, 64),
 ]
-GRID_IDX = 1
+GRID_IDX = 0   # RXset 0 = the full user grid (DeepMIMO 4.x); tx_sets=[bs] selects the BS
+N_BS = 3       # base stations per city to pool from (TXset 1..3), to offset LoS-link dropout
 
 
 def patches_per_realization(n_ant: int, n_sub: int, patch: int = PATCH) -> int:
@@ -86,12 +87,25 @@ def subsample(channels: torch.Tensor, n: int, seed: int) -> torch.Tensor:
     return channels[torch.as_tensor(np.sort(idx))]
 
 
-def gather_city_channels(scn, n_ant, n_sub, n, bs_idx, seed):
-    """Generate a city's channels via DeepMIMO and return a random ``n``-realization subset."""
-    channels, _ = generate_channels_and_labels(
-        n_ant_bs=n_ant, n_subcarriers=n_sub, bs_idx=bs_idx, grid_idx=GRID_IDX,
-        scenario_name=scn, rows=None, task=None)
-    return subsample(channels, n, seed)
+def gather_city_channels(scn, n_ant, n_sub, n, seed, max_bs=N_BS):
+    """Generate a city's valid channels via DeepMIMO and return a random ``n``-realization subset.
+
+    Pools base stations TXset 1..max_bs (each a distinct realization of the same user grid),
+    stopping early once ``n`` valid (LoS-cleaned) channels are collected, since LoS-link dropout
+    leaves only a fraction of the raw user grid usable.
+    """
+    pool = []
+    have = 0
+    for bs_idx in range(1, max_bs + 1):
+        channels, _ = generate_channels_and_labels(
+            n_ant_bs=n_ant, n_subcarriers=n_sub, bs_idx=bs_idx, grid_idx=GRID_IDX,
+            scenario_name=scn, rows=None, task=None)
+        pool.append(channels)
+        have += channels.shape[0]
+        if have >= n:
+            break
+    channels = torch.cat(pool, dim=0) if len(pool) > 1 else pool[0]
+    return subsample(channels, n, seed), channels.shape[0]
 
 
 def tokenize_cities(channel_sets, seed):
@@ -106,22 +120,40 @@ def tokenize_cities(channel_sets, seed):
     return merged
 
 
-def build_loaders(merged, batch_size, val_frac=0.2, seed=42):
-    """Per-seq-length in-memory train/val DataLoaders of (input_ids, masked_tokens, masked_pos)."""
-    train_loaders, val_loaders = {}, {}
+def merged_to_loaders(merged, batch_size, shuffle):
+    """Build {seq_len: DataLoader} of (input_ids, masked_tokens, masked_pos) from a grouped dict."""
+    loaders = {}
     for seq_len, samples in merged.items():
         ids = torch.tensor(np.stack([s[0] for s in samples]), dtype=torch.float32)
         toks = torch.tensor(np.stack([np.stack(s[1]) for s in samples]), dtype=torch.float32)
         pos = torch.tensor(np.stack([s[2] for s in samples]), dtype=torch.long)
-        n = ids.shape[0]
-        perm = np.random.RandomState(seed).permutation(n)
-        n_val = max(1, int(val_frac * n))
-        vi, ti = perm[:n_val], perm[n_val:]
-        train_loaders[seq_len] = DataLoader(TensorDataset(ids[ti], toks[ti], pos[ti]),
-                                            batch_size=batch_size, shuffle=True)
-        val_loaders[seq_len] = DataLoader(TensorDataset(ids[vi], toks[vi], pos[vi]),
-                                          batch_size=batch_size, shuffle=False)
-    return train_loaders, val_loaders
+        loaders[seq_len] = DataLoader(TensorDataset(ids, toks, pos),
+                                      batch_size=batch_size, shuffle=shuffle)
+    return loaders
+
+
+def split_by_city(channel_sets, val_frac, seed):
+    """Stratified 99/1-style split: split EACH city's realizations into (train, val) sets."""
+    train_sets, val_sets = [], []
+    for i, ch in enumerate(channel_sets):
+        m = ch.shape[0]
+        perm = np.random.RandomState(seed + i).permutation(m)
+        n_val = max(1, round(val_frac * m))
+        val_sets.append(ch[torch.as_tensor(np.sort(perm[:n_val]))])
+        train_sets.append(ch[torch.as_tensor(np.sort(perm[n_val:]))])
+    return train_sets, val_sets
+
+
+def load_channel_dataset(dataset_dir, split):
+    """Load per-city channel shards for a split ('train'|'val') from a generated dataset dir."""
+    import json
+    with open(os.path.join(dataset_dir, 'manifest.json')) as f:
+        manifest = json.load(f)
+    sets = []
+    for city in manifest['cities']:
+        path = os.path.join(dataset_dir, city[f'{split}_shard'])
+        sets.append(torch.load(path, weights_only=False))
+    return sets
 
 
 def build_model(arch, d_model, n_layers, device):
@@ -141,7 +173,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--arch', choices=['transformer', 'mamba'], default='transformer')
     ap.add_argument('--tokens-per-city', type=int, default=500_000, help='~10M total over 20 cities')
-    ap.add_argument('--bs-idx', type=int, default=1)
+    ap.add_argument('--dataset-dir', default=None,
+                    help='load a pre-generated channel dataset (per-city train/val shards) and skip DeepMIMO.')
+    ap.add_argument('--val-frac', type=float, default=0.01, help='per-city validation fraction (99/1 split).')
     ap.add_argument('--d-model', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--epochs', type=int, default=50)
@@ -158,24 +192,29 @@ def main():
     if args.smoke:
         args.tokens_per_city, args.n_layers, args.epochs, args.warmup_epochs = 4000, 2, 1, 0
 
-    plan = plan_sampling(args.tokens_per_city)
-    total_real = sum(p[3] for p in plan)
-    total_tok = sum(p[5] for p in plan)
-    print(f"Sampling plan ({args.tokens_per_city} tokens/city): "
-          f"{total_real} realizations -> ~{total_tok/1e6:.2f}M tokens")
-    for scn, a, s, n, pp, tok in plan:
-        print(f"  {scn:32s} {a:3d}x{s:<4d} patches={pp:5d}  n={n:6d}  tokens={tok}")
+    # Obtain per-city train/val channel sets, either from a pre-generated dataset or fresh DeepMIMO.
+    if args.dataset_dir:
+        print(f"Loading channel dataset from {args.dataset_dir} ...")
+        train_sets = load_channel_dataset(args.dataset_dir, 'train')
+        val_sets = load_channel_dataset(args.dataset_dir, 'val')
+    else:
+        plan = plan_sampling(args.tokens_per_city)
+        print(f"Generating channels (DeepMIMO) for ~{sum(p[5] for p in plan)/1e6:.1f}M tokens ...")
+        channel_sets = []
+        for scn, n_ant, n_sub, n, pp, _ in plan:
+            ch, avail = gather_city_channels(scn, n_ant, n_sub, n, args.seed)
+            print(f"  {scn}: kept {ch.shape[0]}/{avail} valid (want {n}, patches={pp})")
+            channel_sets.append(ch)
+        train_sets, val_sets = split_by_city(channel_sets, args.val_frac, args.seed)
 
-    print("\nGenerating + tokenizing channels (DeepMIMO) ...")
-    channel_sets = []
-    for scn, n_ant, n_sub, n, _, _ in plan:
-        ch = gather_city_channels(scn, n_ant, n_sub, n, args.bs_idx, args.seed)
-        print(f"  {scn}: kept {ch.shape[0]} realizations of shape {tuple(ch.shape[1:])}")
-        channel_sets.append(ch)
-
-    merged = tokenize_cities(channel_sets, args.seed)
-    print(f"\nSeq-length groups: {{ {', '.join(f'{k}:{len(v)}' for k, v in sorted(merged.items()))} }}")
-    train_loaders, val_loaders = build_loaders(merged, args.batch_size, seed=args.seed)
+    train_merged = tokenize_cities(train_sets, args.seed)
+    val_merged = tokenize_cities(val_sets, args.seed)
+    n_train = sum(len(v) for v in train_merged.values())
+    n_val = sum(len(v) for v in val_merged.values())
+    print(f"\nTrain {n_train} / Val {n_val} realizations; "
+          f"seq-len groups: {sorted(train_merged.keys())}")
+    train_loaders = merged_to_loaders(train_merged, args.batch_size, shuffle=True)
+    val_loaders = merged_to_loaders(val_merged, args.batch_size, shuffle=False)
 
     model = build_model(args.arch, args.d_model, args.n_layers, device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

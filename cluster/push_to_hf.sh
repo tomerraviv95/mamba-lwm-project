@@ -34,4 +34,8 @@ if [ "$WHAT" = "channel" ]; then
     uv run --no-sync python spectro/scripts/hf_sync.py push-ckpts \
         --repo "$HF_CHANNEL_REPO" --dir "$CHANNEL_CKPT_DIR" $PRIV
 fi
+if [ "$WHAT" = "channel-data" ]; then
+    uv run --no-sync python spectro/scripts/hf_sync.py push-dataset \
+        --repo "$HF_CHANNEL_DATASET_REPO" --dir "$CHANNEL_DATA_DIR" $PRIV
+fi
 echo "Published: $WHAT"
