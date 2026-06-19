@@ -17,7 +17,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$HOME/lwm-competition-2025/cluster/config.env"
+source "${SLURM_SUBMIT_DIR:-$HOME/lwm-competition-2025}/cluster/config.env"
 
 export PATH="$HOME/.local/bin:$PATH"     # uv
 module load cuda/12.4 || true
