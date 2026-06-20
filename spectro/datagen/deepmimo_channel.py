@@ -17,6 +17,17 @@ import torch
 
 C = 3e8
 
+# The 20 LWM city scenarios (path delays/powers/angles are geometric -> antenna config irrelevant).
+CITY_SCENARIOS = [
+    "city_0_newyork_3p5_lwm", "city_1_losangeles_3p5_lwm", "city_2_chicago_3p5_lwm",
+    "city_3_houston_3p5_lwm", "city_4_phoenix_3p5_lwm", "city_5_philadelphia_3p5_lwm",
+    "city_6_miami_3p5_lwm", "city_7_sandiego_3p5_lwm", "city_8_dallas_3p5_lwm",
+    "city_9_sanfrancisco_3p5_lwm", "city_10_austin_3p5_lwm", "city_11_santaclara_3p5_lwm",
+    "city_12_fortworth_3p5_lwm", "city_13_columbus_3p5_lwm", "city_14_charlotte_3p5_lwm",
+    "city_15_indianapolis_3p5_lwm", "city_16_sanfrancisco_3p5_lwm", "city_17_seattle_3p5_lwm",
+    "city_18_denver_3p5_lwm", "city_19_oklahoma_3p5_lwm",
+]
+
 
 def extract_city_pdp(scenario, bs_idx=1, grid_idx=0, max_paths=None):
     """Return padded per-(valid-)user ray tables for a DeepMIMO city.
@@ -60,8 +71,10 @@ def deepmimo_tdl_cir(delay, power_linear, phase, aoa_az, speed, num_time_steps, 
     B, K = delay.shape
     t = torch.arange(num_time_steps, device=device, dtype=torch.float32) / sample_rate   # (T,)
 
+    # speed: scalar or per-sample (B,) [m/s] -> (B,1) for broadcasting against (B,K)
+    speed_t = torch.as_tensor(np.asarray(speed), dtype=torch.float32, device=device).reshape(-1, 1)
     g = torch.sqrt(torch.clamp(power_linear, min=0.0)) * torch.exp(1j * phase.to(torch.complex64))
-    fd = (speed / C) * fc * torch.cos(aoa_az)                       # (B,K) per-ray Doppler [Hz]
+    fd = (speed_t / C) * fc * torch.cos(aoa_az)                    # (B,K) per-ray Doppler [Hz]
     ramp = torch.exp(1j * (2 * np.pi * fd[..., None] * t[None, None, :]).to(torch.complex64))  # (B,K,T)
     a = (g[..., None] * ramp).reshape(B, 1, 1, 1, 1, K, num_time_steps)
     tau = delay.reshape(B, 1, 1, K)
