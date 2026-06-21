@@ -56,6 +56,9 @@ def main():
     ap.add_argument('--mod-classes-per-batch', type=int, default=3)
     ap.add_argument('--contrast', nargs=2, default=['snr', 'mob'], choices=['mod', 'snr', 'mob'],
                     help='labels to contrast on (magnitude spectrograms: snr/mob, not mod).')
+    ap.add_argument('--w-mlm', type=float, default=1.0)
+    ap.add_argument('--w-a', type=float, default=50.0, help='weight for contrast[0] (authors use ~50, ≫MLM, to prevent collapse).')
+    ap.add_argument('--w-b', type=float, default=30.0, help='weight for contrast[1].')
     ap.add_argument('--pdp-pool', default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                        '..', 'outputs', 'pdp_pool'))
     ap.add_argument('--seed', type=int, default=42)
@@ -81,7 +84,7 @@ def main():
                                    mask_percent=0.6, steps=args.steps, lr=1e-3, batch=batch,
                                    device=device, seed=args.seed, objective='contrastive',
                                    mod_classes_per_batch=args.mod_classes_per_batch,
-                                   contrast=tuple(args.contrast),
+                                   contrast=tuple(args.contrast), w_mlm=args.w_mlm, w_a=args.w_a, w_b=args.w_b,
                                    log_every=max(100, args.steps // 5), out_path=None)
         moe1.experts[proto].load_state_dict(m.state_dict())
         del m; torch.cuda.empty_cache()
