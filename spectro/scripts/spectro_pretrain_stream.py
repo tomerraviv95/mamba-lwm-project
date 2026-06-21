@@ -25,6 +25,7 @@ from spectro_backbones import build_expert  # noqa: E402
 from spectro_data import PROTOCOLS  # noqa: E402
 from spectro_moe import RouterNet, _normalize_per_sample  # noqa: E402
 import stream as S  # noqa: E402
+from contrastive import ProjectionHead, supervised_contrastive_loss  # noqa: E402
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 
@@ -35,26 +36,47 @@ def weights_dir(arch):
 
 def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent, steps, lr,
                            batch, device, seed, grad_clip=1.0, log_every=200, ckpt_every=2000,
-                           out_path=None):
+                           out_path=None, objective='contrastive',
+                           w_mlm=1.0, w_mod=1.0, w_mob=1.0):
+    """Stream-pretrain one expert. objective='contrastive' = MLM(mean) + SupCon(mod)+SupCon(mobility)
+    (the authors' recipe; prevents the collapse seen with MLM-only). 'mlm' = masked-MSE only."""
     model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    params = list(model.parameters())
+    mod_proj = mob_proj = None
+    if objective == 'contrastive':
+        mod_proj = ProjectionHead(d_model).to(device)
+        mob_proj = ProjectionHead(d_model).to(device)
+        params += list(mod_proj.parameters()) + list(mob_proj.parameters())
+    opt = torch.optim.Adam(params, lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps))
-    crit = nn.MSELoss(reduction='sum')
+    mse_mean = nn.MSELoss(reduction='mean')
+    mse_sum = nn.MSELoss(reduction='sum')
     rng = np.random.RandomState(seed)
     model.train()
-    run, run_n = 0.0, 0
+    agg = {'mlm': 0.0, 'mod': 0.0, 'mob': 0.0, 'n': 0}
     for step in range(steps):
-        ids, toks, pos = S.gen_masked_batch(pool, tech, batch, mask_percent, rng, device=device)
         opt.zero_grad()
-        loss = crit(toks, model(ids, pos)[0])
+        if objective == 'contrastive':
+            ids, toks, pos, modl, mobl = S.gen_contrastive_batch(pool, tech, batch, mask_percent, rng, device=device)
+            logits, enc = model(ids, pos)          # expert returns (masked_logits, encoder_out)
+            l_mlm = mse_mean(toks, logits)
+            l_mod = supervised_contrastive_loss(mod_proj(enc), modl)
+            l_mob = supervised_contrastive_loss(mob_proj(enc), mobl)
+            loss = w_mlm * l_mlm + w_mod * l_mod + w_mob * l_mob
+            agg['mlm'] += l_mlm.item(); agg['mod'] += l_mod.item(); agg['mob'] += l_mob.item()
+        else:
+            ids, toks, pos = S.gen_masked_batch(pool, tech, batch, mask_percent, rng, device=device)
+            loss = mse_sum(toks, model(ids, pos)[0]); agg['mlm'] += loss.item()
         loss.backward()
         if grad_clip:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            torch.nn.utils.clip_grad_norm_(params, grad_clip)
         opt.step(); sched.step()
-        run += loss.item(); run_n += ids.shape[0]
+        agg['n'] += 1
         if (step + 1) % log_every == 0:
-            print(f"    [{tech}] step {step+1}/{steps}  mse={run/max(run_n,1):.4f}", flush=True)
-            run, run_n = 0.0, 0
+            n = max(agg['n'], 1)
+            print(f"    [{tech}] step {step+1}/{steps}  mlm={agg['mlm']/n:.4f} "
+                  f"supcon_mod={agg['mod']/n:.4f} supcon_mob={agg['mob']/n:.4f}", flush=True)
+            agg = {'mlm': 0.0, 'mod': 0.0, 'mob': 0.0, 'n': 0}
         if out_path and (step + 1) % ckpt_every == 0:
             _save(model, out_path, arch, d_model, n_layers)
     if out_path:
@@ -98,6 +120,11 @@ def main():
     ap.add_argument('--d-model', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--mask-percent', type=float, default=0.6)
+    ap.add_argument('--objective', choices=['contrastive', 'mlm'], default='contrastive',
+                    help="contrastive = MLM + SupCon(mod)+SupCon(mobility) (authors' recipe); mlm = masked-MSE only.")
+    ap.add_argument('--w-mlm', type=float, default=1.0)
+    ap.add_argument('--w-mod', type=float, default=1.0)
+    ap.add_argument('--w-mob', type=float, default=1.0)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--batch', type=int, default=32,
                     help='keep <=32 on a 24GB GPU; the time-varying channel tensor is the limiter.')
@@ -123,7 +150,8 @@ def main():
         pretrain_expert_stream(pool, proto, arch=args.arch, d_model=args.d_model,
                                n_layers=args.n_layers, mask_percent=args.mask_percent, steps=steps,
                                lr=args.lr, batch=args.batch, device=device, seed=args.seed,
-                               grad_clip=args.grad_clip, out_path=os.path.join(out, f'{proto}_expert.pth'))
+                               grad_clip=args.grad_clip, out_path=os.path.join(out, f'{proto}_expert.pth'),
+                               objective=args.objective, w_mlm=args.w_mlm, w_mod=args.w_mod, w_mob=args.w_mob)
         print(f"[Expert {proto}] saved -> {out}/{proto}_expert.pth")
 
     print(f"\n[Router] streaming {router_steps} steps ...")

@@ -89,6 +89,53 @@ def gen_masked_batch(pool, tech, b, mask_percent, rng, device=DEVICE):
     return ids.to(device), toks.to(device), pos.to(device)
 
 
+def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE):
+    """Masked batch with MIXED modulations + (mod, mobility) labels for SupCon.
+
+    Same tech (fixed OFDM numerology) but per-sample modulation/SNR/mobility, so the supervised
+    contrastive loss has positives/negatives. Returns
+    (input_ids, masked_tokens, masked_pos, mod_labels, mob_labels) — the first three on device,
+    labels as long tensors on device.
+    """
+    cfg = PROTOCOL_CONFIGS[tech]
+    sr = cfg.sample_rate
+    rg, _, rg_mapper, modulator = _ofdm_chain(tech, MODULATIONS[0])   # rg/modulator are mod-independent
+    nd = rg.num_data_symbols
+
+    mod_ids = rng.randint(0, len(MODULATIONS), size=b)
+    snrs = [int(SNRS_DB[i]) for i in rng.randint(0, len(SNRS_DB), size=b)]
+    mob_ids = rng.randint(0, len(MOBILITIES), size=b)
+    speeds = np.array([MOBILITY_SPEED_MS[MOBILITIES[m]] for m in mob_ids], dtype=np.float32)
+
+    # build a mixed-modulation symbol grid: each sample mapped by its own constellation
+    symbols = torch.zeros(b, 1, 1, nd, dtype=torch.complex64, device=device)
+    for m in np.unique(mod_ids):
+        sel = np.where(mod_ids == m)[0]
+        mod = MODULATIONS[m]
+        mapper = _ofdm_chain(tech, mod)[1]
+        bits = _BINARY_SOURCE([len(sel), 1, 1, int(nd * MOD_BITS[mod])])
+        symbols[torch.as_tensor(sel, device=device)] = mapper(bits).to(device)
+    x = modulator(rg_mapper(symbols))                                # (b,1,1,T)
+    num_time = x.shape[-1]
+    l_min, l_max = time_lag_discrete_time_channel(sr)
+    l_tot = l_max - l_min + 1
+    idx = rng.randint(0, pool['delay'].shape[0], size=b)
+    a, tau = deepmimo_tdl_cir(pool['delay'][idx].numpy(), pool['power_linear'][idx].numpy(),
+                              pool['phase'][idx].numpy(), pool['aoa_az'][idx].numpy(),
+                              speeds, num_time + l_tot - 1, sr, fc=CARRIER_FREQUENCY_HZ, device=device)
+    h = cir_to_time_channel(sr, a, tau, l_min=l_min, l_max=l_max, normalize=True)
+    y = _apply_layer(num_time, l_tot)(x, h).reshape(b, -1)
+    p = y.abs().pow(2).mean(dim=1, keepdim=True)
+    snr_lin = torch.tensor([10.0 ** (s / 10.0) for s in snrs], device=y.device).reshape(b, 1)
+    y = y + torch.sqrt((p / snr_lin) / 2) * torch.complex(torch.randn_like(y.real), torch.randn_like(y.real))
+    specs = iq_batch_to_spectrogram(y).cpu().float().squeeze(1)
+
+    ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=int(rng.randint(1 << 30)))
+    return (ids.to(device), toks.to(device), pos.to(device),
+            torch.as_tensor(mod_ids, dtype=torch.long, device=device),
+            torch.as_tensor(mob_ids, dtype=torch.long, device=device))
+
+
 def gen_router_batch(pool, b, rng, device=DEVICE):
     """Generate a batch mixing protocols for router training. Returns (specs (b,128,128), tech_idx (b,))."""
     # one tech per call keeps OFDM uniform; cycle techs across calls for balance
