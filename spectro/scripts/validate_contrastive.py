@@ -54,6 +54,8 @@ def main():
     ap.add_argument('--batch', type=int, default=None, help='default 8 (transformer) / 32 (mamba)')
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--mod-classes-per-batch', type=int, default=3)
+    ap.add_argument('--contrast', nargs=2, default=['snr', 'mob'], choices=['mod', 'snr', 'mob'],
+                    help='labels to contrast on (magnitude spectrograms: snr/mob, not mod).')
     ap.add_argument('--pdp-pool', default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                        '..', 'outputs', 'pdp_pool'))
     ap.add_argument('--seed', type=int, default=42)
@@ -79,6 +81,7 @@ def main():
                                    mask_percent=0.6, steps=args.steps, lr=1e-3, batch=batch,
                                    device=device, seed=args.seed, objective='contrastive',
                                    mod_classes_per_batch=args.mod_classes_per_batch,
+                                   contrast=tuple(args.contrast),
                                    log_every=max(100, args.steps // 5), out_path=None)
         moe1.experts[proto].load_state_dict(m.state_dict())
         del m; torch.cuda.empty_cache()

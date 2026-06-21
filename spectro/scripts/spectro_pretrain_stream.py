@@ -37,7 +37,8 @@ def weights_dir(arch):
 def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent, steps, lr,
                            batch, device, seed, grad_clip=1.0, log_every=200, ckpt_every=2000,
                            out_path=None, objective='contrastive',
-                           w_mlm=1.0, w_mod=1.0, w_mob=1.0, mod_classes_per_batch=3):
+                           w_mlm=1.0, w_a=1.0, w_b=1.0, contrast=('snr', 'mob'),
+                           mod_classes_per_batch=3):
     """Stream-pretrain one expert. objective='contrastive' = MLM(mean) + SupCon(mod)+SupCon(mobility)
     (the authors' recipe; prevents the collapse seen with MLM-only). 'mlm' = masked-MSE only."""
     model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
@@ -53,19 +54,20 @@ def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent,
     mse_sum = nn.MSELoss(reduction='sum')
     rng = np.random.RandomState(seed)
     model.train()
-    agg = {'mlm': 0.0, 'mod': 0.0, 'mob': 0.0, 'n': 0}
+    ca, cb = contrast   # which two labels to contrast on (e.g. 'snr','mob')
+    agg = {'mlm': 0.0, 'a': 0.0, 'b': 0.0, 'n': 0}
     for step in range(steps):
         opt.zero_grad()
         if objective == 'contrastive':
-            ids, toks, pos, modl, mobl = S.gen_contrastive_batch(
+            ids, toks, pos, labels = S.gen_contrastive_batch(
                 pool, tech, batch, mask_percent, rng, device=device,
                 mod_classes_per_batch=mod_classes_per_batch)
             logits, enc = model(ids, pos)          # expert returns (masked_logits, encoder_out)
             l_mlm = mse_mean(toks, logits)
-            l_mod = supervised_contrastive_loss(mod_proj(enc), modl)
-            l_mob = supervised_contrastive_loss(mob_proj(enc), mobl)
-            loss = w_mlm * l_mlm + w_mod * l_mod + w_mob * l_mob
-            agg['mlm'] += l_mlm.item(); agg['mod'] += l_mod.item(); agg['mob'] += l_mob.item()
+            l_a = supervised_contrastive_loss(mod_proj(enc), labels[ca])
+            l_b = supervised_contrastive_loss(mob_proj(enc), labels[cb])
+            loss = w_mlm * l_mlm + w_a * l_a + w_b * l_b
+            agg['mlm'] += l_mlm.item(); agg['a'] += l_a.item(); agg['b'] += l_b.item()
         else:
             ids, toks, pos = S.gen_masked_batch(pool, tech, batch, mask_percent, rng, device=device)
             loss = mse_sum(toks, model(ids, pos)[0]); agg['mlm'] += loss.item()
@@ -77,8 +79,8 @@ def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent,
         if (step + 1) % log_every == 0:
             n = max(agg['n'], 1)
             print(f"    [{tech}] step {step+1}/{steps}  mlm={agg['mlm']/n:.4f} "
-                  f"supcon_mod={agg['mod']/n:.4f} supcon_mob={agg['mob']/n:.4f}", flush=True)
-            agg = {'mlm': 0.0, 'mod': 0.0, 'mob': 0.0, 'n': 0}
+                  f"supcon_{ca}={agg['a']/n:.4f} supcon_{cb}={agg['b']/n:.4f}", flush=True)
+            agg = {'mlm': 0.0, 'a': 0.0, 'b': 0.0, 'n': 0}
         if out_path and (step + 1) % ckpt_every == 0:
             _save(model, out_path, arch, d_model, n_layers)
     if out_path:
@@ -125,8 +127,10 @@ def main():
     ap.add_argument('--objective', choices=['contrastive', 'mlm'], default='contrastive',
                     help="contrastive = MLM + SupCon(mod)+SupCon(mobility) (authors' recipe); mlm = masked-MSE only.")
     ap.add_argument('--w-mlm', type=float, default=1.0)
-    ap.add_argument('--w-mod', type=float, default=1.0)
-    ap.add_argument('--w-mob', type=float, default=1.0)
+    ap.add_argument('--w-a', type=float, default=1.0)
+    ap.add_argument('--w-b', type=float, default=1.0)
+    ap.add_argument('--contrast', nargs=2, default=['snr', 'mob'], choices=['mod', 'snr', 'mob'],
+                    help='two labels to contrast on. magnitude spectrograms -> snr/mob (mod barely separable).')
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--batch', type=int, default=32,
                     help='keep <=32 on a 24GB GPU; the time-varying channel tensor is the limiter.')
@@ -153,7 +157,8 @@ def main():
                                n_layers=args.n_layers, mask_percent=args.mask_percent, steps=steps,
                                lr=args.lr, batch=args.batch, device=device, seed=args.seed,
                                grad_clip=args.grad_clip, out_path=os.path.join(out, f'{proto}_expert.pth'),
-                               objective=args.objective, w_mlm=args.w_mlm, w_mod=args.w_mod, w_mob=args.w_mob)
+                               objective=args.objective, w_mlm=args.w_mlm, w_a=args.w_a, w_b=args.w_b,
+                               contrast=tuple(args.contrast))
         print(f"[Expert {proto}] saved -> {out}/{proto}_expert.pth")
 
     print(f"\n[Router] streaming {router_steps} steps ...")

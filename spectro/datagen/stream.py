@@ -106,7 +106,8 @@ def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE, mod_c
     k = min(mod_classes_per_batch, len(MODULATIONS))
     mod_subset = rng.choice(len(MODULATIONS), size=k, replace=False)
     mod_ids = rng.choice(mod_subset, size=b)
-    snrs = [int(SNRS_DB[i]) for i in rng.randint(0, len(SNRS_DB), size=b)]
+    snr_ids = rng.randint(0, len(SNRS_DB), size=b)
+    snrs = [int(SNRS_DB[i]) for i in snr_ids]
     mob_ids = rng.randint(0, len(MOBILITIES), size=b)
     speeds = np.array([MOBILITY_SPEED_MS[MOBILITIES[m]] for m in mob_ids], dtype=np.float32)
 
@@ -134,9 +135,10 @@ def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE, mod_c
     specs = iq_batch_to_spectrogram(y).cpu().float().squeeze(1)
 
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=int(rng.randint(1 << 30)))
-    return (ids.to(device), toks.to(device), pos.to(device),
-            torch.as_tensor(mod_ids, dtype=torch.long, device=device),
-            torch.as_tensor(mob_ids, dtype=torch.long, device=device))
+    labels = {'mod': torch.as_tensor(mod_ids, dtype=torch.long, device=device),
+              'snr': torch.as_tensor(snr_ids, dtype=torch.long, device=device),
+              'mob': torch.as_tensor(mob_ids, dtype=torch.long, device=device)}
+    return ids.to(device), toks.to(device), pos.to(device), labels
 
 
 def gen_router_batch(pool, b, rng, device=DEVICE):
