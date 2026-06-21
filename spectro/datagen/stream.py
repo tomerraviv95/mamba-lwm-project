@@ -89,12 +89,13 @@ def gen_masked_batch(pool, tech, b, mask_percent, rng, device=DEVICE):
     return ids.to(device), toks.to(device), pos.to(device)
 
 
-def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE):
+def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE, mod_classes_per_batch=3):
     """Masked batch with MIXED modulations + (mod, mobility) labels for SupCon.
 
-    Same tech (fixed OFDM numerology) but per-sample modulation/SNR/mobility, so the supervised
-    contrastive loss has positives/negatives. Returns
-    (input_ids, masked_tokens, masked_pos, mod_labels, mob_labels) — the first three on device,
+    Same tech (fixed OFDM numerology) but per-sample modulation/SNR/mobility. To give SupCon real
+    positives at small batch (the Transformer caps batch ~8 at seq 1025), each batch draws from
+    only ``mod_classes_per_batch`` modulation classes (so each class gets several samples). Returns
+    (input_ids, masked_tokens, masked_pos, mod_labels, mob_labels) — first three on device,
     labels as long tensors on device.
     """
     cfg = PROTOCOL_CONFIGS[tech]
@@ -102,7 +103,9 @@ def gen_contrastive_batch(pool, tech, b, mask_percent, rng, device=DEVICE):
     rg, _, rg_mapper, modulator = _ofdm_chain(tech, MODULATIONS[0])   # rg/modulator are mod-independent
     nd = rg.num_data_symbols
 
-    mod_ids = rng.randint(0, len(MODULATIONS), size=b)
+    k = min(mod_classes_per_batch, len(MODULATIONS))
+    mod_subset = rng.choice(len(MODULATIONS), size=k, replace=False)
+    mod_ids = rng.choice(mod_subset, size=b)
     snrs = [int(SNRS_DB[i]) for i in rng.randint(0, len(SNRS_DB), size=b)]
     mob_ids = rng.randint(0, len(MOBILITIES), size=b)
     speeds = np.array([MOBILITY_SPEED_MS[MOBILITIES[m]] for m in mob_ids], dtype=np.float32)

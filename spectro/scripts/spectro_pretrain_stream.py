@@ -37,7 +37,7 @@ def weights_dir(arch):
 def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent, steps, lr,
                            batch, device, seed, grad_clip=1.0, log_every=200, ckpt_every=2000,
                            out_path=None, objective='contrastive',
-                           w_mlm=1.0, w_mod=1.0, w_mob=1.0):
+                           w_mlm=1.0, w_mod=1.0, w_mob=1.0, mod_classes_per_batch=3):
     """Stream-pretrain one expert. objective='contrastive' = MLM(mean) + SupCon(mod)+SupCon(mobility)
     (the authors' recipe; prevents the collapse seen with MLM-only). 'mlm' = masked-MSE only."""
     model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
@@ -57,7 +57,9 @@ def pretrain_expert_stream(pool, tech, *, arch, d_model, n_layers, mask_percent,
     for step in range(steps):
         opt.zero_grad()
         if objective == 'contrastive':
-            ids, toks, pos, modl, mobl = S.gen_contrastive_batch(pool, tech, batch, mask_percent, rng, device=device)
+            ids, toks, pos, modl, mobl = S.gen_contrastive_batch(
+                pool, tech, batch, mask_percent, rng, device=device,
+                mod_classes_per_batch=mod_classes_per_batch)
             logits, enc = model(ids, pos)          # expert returns (masked_logits, encoder_out)
             l_mlm = mse_mean(toks, logits)
             l_mod = supervised_contrastive_loss(mod_proj(enc), modl)
