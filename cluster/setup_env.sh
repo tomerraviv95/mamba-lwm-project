@@ -32,12 +32,16 @@ cd "$REPO_ROOT"
 echo "uv sync -> $REPO_ROOT/.venv (from uv.lock; uv fetches a managed Python if needed) ..."
 uv sync
 
-# Build mamba-ssm against the just-synced torch. nvcc comes from the cuda module; with no GPU
-# on the login node we must declare the target arch (rtx_3090 = 8.6).
-# Use cuda/12.4 (same MAJOR as torch's bundled CUDA 12.8 -> minor mismatch is fine, just warns).
-# Do NOT use cuda/13: a major-version mismatch (13 vs 12) makes PyTorch's extension build fail.
-# (The module is only for building; torch's pip wheel bundles its own 12.8 runtime for execution.)
-module load cuda/12.4 || true
+# Build the CUDA extensions against the .venv's torch (2.10.0+cu128). nvcc's MAJOR must match
+# torch's CUDA major (12) — a CUDA-13 toolkit HARD-FAILS PyTorch's extension build. The cluster
+# has a cuda/12.8 module (exact match for cu128); 12.4 also works (same major, just warns).
+# We pin CUDA_HOME from the LOADED nvcc so a stale `export CUDA_HOME=...cuda-13.0` in your shell
+# can't poison the build. (The toolkit is only for building; torch's wheel bundles its 12.8 runtime.)
+module load cuda/12.8 || module load cuda/12.4 || true
+if command -v nvcc >/dev/null 2>&1; then
+    export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+fi
+echo "Using CUDA_HOME=${CUDA_HOME:-<unset>}"; nvcc --version 2>/dev/null | tail -2 || true
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
 
 # --- make the conda-forge host compiler available (no system g++ on this cluster) ---
@@ -50,15 +54,20 @@ export NVCC_PREPEND_FLAGS="-ccbin $CXX"
 echo "Using CC=$CC"
 echo "Using CXX=$CXX"
 
-echo "Building mamba-ssm 2.3.0 (--no-build-isolation) ..."
-uv pip install --no-build-isolation "mamba-ssm==2.3.0"
+# CRITICAL: target the project .venv explicitly (--python). conda 'mamba-build' is activated above
+# only for its host compiler; without --python, `uv pip install` would install into the ACTIVE
+# CONDA env (which may carry a different torch, e.g. cu130) instead of the .venv the jobs use,
+# producing a CUDA-version mismatch at build time.
+VENV_PY="$REPO_ROOT/.venv/bin/python"
+echo "Building mamba-ssm 2.3.0 into the .venv (--no-build-isolation) ..."
+uv pip install --python "$VENV_PY" --no-build-isolation "mamba-ssm==2.3.0"
 
 # Build causal-conv1d (same toolchain). WITHOUT it, mamba_ssm.Mamba can't use its fully-fused
 # mamba_inner_fn and falls back to an unfused conv+scan path — measured ~8x slower per epoch than
 # the Transformer expert on our bidirectional 12-layer experts (seq=1025). With it, mamba is viable.
 # Non-fatal: if the build fails the env still runs (just slow), so don't abort setup.
-echo "Building causal-conv1d 1.4.0 (--no-build-isolation; speeds up mamba ~4x) ..."
-CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --no-build-isolation "causal-conv1d==1.4.0" \
+echo "Building causal-conv1d 1.4.0 into the .venv (--no-build-isolation; speeds up mamba ~4x) ..."
+CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation "causal-conv1d==1.4.0" \
   || echo "WARNING: causal-conv1d build failed; mamba will run on the SLOW unfused path." >&2
 
 # --- Dr.Jit/Mitsuba LLVM backend so `import sionna` works on ANY node ---------------------
@@ -93,7 +102,8 @@ uv run --no-sync python - <<'PY'
 import os, importlib.util, torch
 print("DRJIT_LIBLLVM_PATH:", os.environ.get("DRJIT_LIBLLVM_PATH", "<unset>"))
 import sionna  # triggers sionna.rt -> Mitsuba/Dr.Jit; needs the LLVM backend on a CPU node
-print("torch", torch.__version__, "| sionna", sionna.__version__)
+print("torch", torch.__version__, "| torch.cuda", torch.version.cuda,
+      "| sionna", getattr(sionna, "__version__", "?"))
 from sionna.phy.channel.tr38901 import TDL  # noqa  (the PHY bits the pipeline actually uses)
 print("mamba-ssm installed:", importlib.util.find_spec("mamba_ssm") is not None)
 _cc = importlib.util.find_spec("causal_conv1d") is not None
