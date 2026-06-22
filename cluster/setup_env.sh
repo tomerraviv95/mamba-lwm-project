@@ -12,7 +12,8 @@
 # compute node uses it via `uv run --no-sync`. Pins the validated stack via uv.lock
 # (torch 2.10 cu128, sionna 2.0.1, ...). mamba-ssm 2.3.0 is built separately with
 # --no-build-isolation (its setup.py imports torch + has dynamic metadata, which breaks uv's
-# isolated build); causal-conv1d is intentionally omitted (mamba-ssm runs without it).
+# isolated build). causal-conv1d is built the same way (non-fatal): without it mamba_ssm falls
+# back to a ~8x-slower unfused conv+scan path on our bidirectional 12-layer experts.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +53,14 @@ echo "Using CXX=$CXX"
 echo "Building mamba-ssm 2.3.0 (--no-build-isolation) ..."
 uv pip install --no-build-isolation "mamba-ssm==2.3.0"
 
+# Build causal-conv1d (same toolchain). WITHOUT it, mamba_ssm.Mamba can't use its fully-fused
+# mamba_inner_fn and falls back to an unfused conv+scan path — measured ~8x slower per epoch than
+# the Transformer expert on our bidirectional 12-layer experts (seq=1025). With it, mamba is viable.
+# Non-fatal: if the build fails the env still runs (just slow), so don't abort setup.
+echo "Building causal-conv1d 1.4.0 (--no-build-isolation; speeds up mamba ~4x) ..."
+CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --no-build-isolation "causal-conv1d==1.4.0" \
+  || echo "WARNING: causal-conv1d build failed; mamba will run on the SLOW unfused path." >&2
+
 # --- Dr.Jit/Mitsuba LLVM backend so `import sionna` works on ANY node ---------------------
 # Sionna's top-level import eagerly loads sionna.rt -> Mitsuba/Dr.Jit, which needs libLLVM.so
 # even though this pipeline only uses sionna.phy. The GPU-less login node (and any CUDA-init
@@ -87,6 +96,8 @@ import sionna  # triggers sionna.rt -> Mitsuba/Dr.Jit; needs the LLVM backend on
 print("torch", torch.__version__, "| sionna", sionna.__version__)
 from sionna.phy.channel.tr38901 import TDL  # noqa  (the PHY bits the pipeline actually uses)
 print("mamba-ssm installed:", importlib.util.find_spec("mamba_ssm") is not None)
+_cc = importlib.util.find_spec("causal_conv1d") is not None
+print("causal-conv1d installed:", _cc, "(FUSED fast mamba)" if _cc else "(SLOW unfused mamba path!)")
 print("NOTE: mamba_ssm import + CUDA run is validated by the first GPU job (02_pretrain).")
 print("-> setup OK")
 PY
