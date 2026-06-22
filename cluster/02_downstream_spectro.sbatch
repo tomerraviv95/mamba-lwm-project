@@ -1,17 +1,19 @@
 #!/bin/bash
 ################################################################################
-# Phase 4: downstream sample-variation sweep on the REAL demo tasks. Arms:
+# Downstream sample-variation sweep on the REAL (magnitude) demo tasks, comparing BOTH our
+# DeepMIMO-contrastive-pretrained backbones against the published baseline + a floor. Arms:
 #   transformer        - LWM-Spectro baseline (precomputed real-corpus embeddings)
-#   transformer_synth  - our Transformer MoE pretrained on synthetic   (needs ARCH=transformer pretrain)
-#   mamba              - our Mamba MoE pretrained on synthetic          (needs ARCH=mamba pretrain)
+#   transformer_synth  - OUR Transformer MoE   (loads spectro_transformer_weights from step 01)
+#   mamba              - OUR Mamba MoE         (loads spectro_mamba_weights from step 01)
 #   raw                - mean-pooled patches (floor)
 # Produces spectro/outputs/plots/spectro_performance_vs_samples.png.
+# Run AFTER both pretrain jobs (cluster/01_pretrain_spectro.sbatch ARCH=transformer & ARCH=mamba).
 #
 # Needs the real demo_data.pt (with precomputed baseline embeddings). Download it
 # ONCE on the login node (internet):
 #     uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights
 # Then:
-#     sbatch cluster/04_downstream_sweep.sbatch
+#     sbatch cluster/02_downstream_spectro.sbatch
 ################################################################################
 #SBATCH --partition main
 #SBATCH --time 0-08:00:00

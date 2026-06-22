@@ -17,6 +17,7 @@ dependencies = [
     "huggingface-hub>=1.0",
     "scikit-learn>=1.3",
     "tqdm>=4.65",
+    "wandb>=0.17",
     # build backend for the post-sync mamba-ssm build (--no-build-isolation):
     "setuptools>=68",
     "wheel",
