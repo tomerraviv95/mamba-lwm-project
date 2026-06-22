@@ -44,7 +44,10 @@ fi
 
 ARCH="${ARCH:-mamba}"                       # transformer | mamba
 BATCH=$([ "$ARCH" = "transformer" ] && echo 8 || echo 32)   # transformer attention is memory-bound
-echo "Spectro $ARCH MoE on FIXED DeepMIMO data ($SPECTRO_DM_EPOCHS epochs, batch $BATCH) ..."
+# A 12-layer transformer from random init DIVERGES at lr=1e-3 (train loss climbs) even with warmup;
+# 5e-4 + warmup descends cleanly. Mamba (SSM) is stable at 1e-3. Warmup itself is in the trainer.
+LR=$([ "$ARCH" = "transformer" ] && echo 5e-4 || echo 1e-3)
+echo "Spectro $ARCH MoE on FIXED DeepMIMO data ($SPECTRO_DM_EPOCHS epochs, batch $BATCH, lr $LR) ..."
 uv run --no-sync python spectro/scripts/spectro_pretrain.py \
     --arch "$ARCH" \
     --data synthetic \
@@ -54,6 +57,7 @@ uv run --no-sync python spectro/scripts/spectro_pretrain.py \
     --n-layers "$N_LAYERS" \
     --mask-percent "$MASK_PERCENT" \
     --batch-size "$BATCH" \
+    --lr "$LR" \
     --seed "$SEED"
 
 echo "Done. Weights + {LTE,WiFi,5G}_losses.csv in spectro/outputs/pretrained_models/spectro_${ARCH}_weights."

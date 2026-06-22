@@ -39,7 +39,7 @@ def weights_dir(arch: str) -> str:
 
 
 def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percent, epochs, lr,
-                    batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0):
+                    batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0, warmup_frac=0.1):
     """Masked-spectrogram-modeling pretraining of one expert (``arch``). Returns best state_dict."""
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
     n = ids.shape[0]
@@ -55,7 +55,15 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
 
     model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
+    # Linear warmup -> cosine decay (per-epoch). A 12-layer transformer from random init
+    # diverges at lr=1e-3 with no warmup (train loss climbs); warmup fixes the early instability.
+    warmup_epochs = max(1, int(warmup_frac * epochs))
+    if warmup_epochs < epochs:
+        warmup = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.1, total_iters=warmup_epochs)
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs - warmup_epochs))
+        sched = torch.optim.lr_scheduler.SequentialLR(opt, [warmup, cosine], milestones=[warmup_epochs])
+    else:
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
     criterion = nn.MSELoss(reduction='sum')
 
     best_val, best_state, ctr = float('inf'), None, 0
