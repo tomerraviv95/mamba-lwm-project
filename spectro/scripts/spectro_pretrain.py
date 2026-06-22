@@ -59,6 +59,7 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
     criterion = nn.MSELoss(reduction='sum')
 
     best_val, best_state, ctr = float('inf'), None, 0
+    history = []
     for ep in range(epochs):
         model.train()
         tr_loss, tr_n = 0.0, 0
@@ -82,7 +83,9 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
                 logits = model(b_ids, b_pos)[0]
                 v_loss += criterion(b_toks, logits).item(); v_n += b_ids.shape[0]
         v_loss /= max(v_n, 1)
-        print(f"    epoch {ep+1}/{epochs}  train_mse={tr_loss/max(tr_n,1):.4f}  val_mse={v_loss:.4f}")
+        tr_mse = tr_loss / max(tr_n, 1)
+        history.append({'epoch': ep + 1, 'train_mse': tr_mse, 'val_mse': v_loss})
+        print(f"    epoch {ep+1}/{epochs}  train_mse={tr_mse:.4f}  val_mse={v_loss:.4f}")
         if v_loss < best_val - 1e-6:
             best_val, ctr = v_loss, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -91,7 +94,7 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
             if ctr >= patience:
                 print(f"    early stop @ epoch {ep+1} (best val_mse={best_val:.4f})")
                 break
-    return best_state, best_val
+    return best_state, best_val, history
 
 
 def train_router(specs: torch.Tensor, protocol: np.ndarray, *, epochs, lr, batch_size,
@@ -194,14 +197,18 @@ def main():
         print(f"\n[Expert {proto}] {specs.shape[0]} training spectrograms")
         if args.smoke:
             specs = specs[:64]
-        state, val = pretrain_expert(
+        state, val, history = pretrain_expert(
             specs, arch=args.arch, d_model=args.d_model, n_layers=args.n_layers,
             mask_percent=args.mask_percent, epochs=args.epochs, lr=args.lr,
             batch_size=args.batch_size, device=device, seed=args.seed, grad_clip=args.grad_clip)
         path = os.path.join(out_dir, f"{proto}_expert.pth")
         torch.save({'state_dict': state, 'val_mse': val, 'arch': args.arch,
                     'd_model': args.d_model, 'n_layers': args.n_layers}, path)
-        print(f"[Expert {proto}] saved -> {path} (val_mse={val:.4f})")
+        # per-epoch train/val loss curve (for choosing the epoch count)
+        with open(os.path.join(out_dir, f"{proto}_losses.csv"), 'w', newline='') as f:
+            import csv as _csv
+            w = _csv.DictWriter(f, fieldnames=['epoch', 'train_mse', 'val_mse']); w.writeheader(); w.writerows(history)
+        print(f"[Expert {proto}] saved -> {path} (val_mse={val:.4f})  curve -> {proto}_losses.csv")
 
     print("\n[Router] training protocol router")
     specs = pool_specs
