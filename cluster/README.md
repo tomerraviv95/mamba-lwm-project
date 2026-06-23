@@ -38,11 +38,16 @@ mkdir -p cluster/logs
 builds `mamba-ssm` **and `causal-conv1d`** with `--no-build-isolation`. Watch the verify line
 `causal-conv1d installed: True (FUSED fast mamba)` — without it mamba runs ~8× slower (unfused).
 
-## 1. Pull the dataset (login node)
+## 1. Pull data + HF source (login node)
 
 ```bash
+# the DeepMIMO-spectrogram pretraining dataset
 uv run --no-sync python spectro/scripts/hf_sync.py pull-dataset \
     --repo tomerraviv95/lwm-spectro-deepmimo --dir spectro/outputs/spectro_deepmimo
+
+# the LWM source + demo eval set (the TRANSFORMER arm wraps the published LWM class; the
+# downstream sweep also needs demo_data.pt). Populates spectro/hf_cache/.
+uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights
 ```
 
 ## 2. Pretrain both backbones

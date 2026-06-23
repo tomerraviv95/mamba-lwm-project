@@ -53,6 +53,12 @@ if [ ! -f "$SPECTRO_DM_DIR/manifest.json" ]; then
     echo "  uv run --no-sync python spectro/scripts/hf_sync.py pull-dataset --repo $SPECTRO_DM_REPO --dir $SPECTRO_DM_DIR" >&2
     exit 1
 fi
+# The transformer arm wraps the published LWM class from the HF mirror; fetch it once (login node).
+if [ "${ARCH:-mamba}" = "transformer" ] && [ ! -f "$REPO_ROOT/spectro/hf_cache/pretraining/pretrained_model.py" ]; then
+    echo "ERROR: transformer arm needs the HF LWM source (spectro/hf_cache/). On the LOGIN node run:" >&2
+    echo "  uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights" >&2
+    exit 1
+fi
 
 ARCH="${ARCH:-mamba}"                       # transformer | mamba
 # Transformer attention is O(seq^2) at seq=1025 -> small physical batch; mamba is cheap.

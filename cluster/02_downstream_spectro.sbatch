@@ -9,9 +9,8 @@
 # Produces spectro/outputs/plots/spectro_performance_vs_samples.png.
 # Run AFTER both pretrain jobs (cluster/01_pretrain_spectro.sbatch ARCH=transformer & ARCH=mamba).
 #
-# Needs the real demo_data.pt (with precomputed baseline embeddings). Download it
-# ONCE on the login node (internet):
-#     uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights
+# Needs the real demo_data.pt + HF source (spectro/hf_cache/) — same download as step 1:
+#     uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights   # login node, once
 # Then:
 #     sbatch cluster/02_downstream_spectro.sbatch
 ################################################################################
