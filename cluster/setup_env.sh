@@ -66,9 +66,22 @@ uv pip install --python "$VENV_PY" --no-build-isolation "mamba-ssm==2.3.0"
 # mamba_inner_fn and falls back to an unfused conv+scan path — measured ~8x slower per epoch than
 # the Transformer expert on our bidirectional 12-layer experts (seq=1025). With it, mamba is viable.
 # Non-fatal: if the build fails the env still runs (just slow), so don't abort setup.
-echo "Building causal-conv1d 1.4.0 into the .venv (--no-build-isolation; speeds up mamba ~4x) ..."
-CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation "causal-conv1d==1.4.0" \
-  || echo "WARNING: causal-conv1d build failed; mamba will run on the SLOW unfused path." >&2
+# IMPORTANT end-state contract: causal-conv1d must be EITHER fully working (the compiled
+# `causal_conv1d_cuda` extension imports) OR completely absent. A half-install (python wrapper
+# present, CUDA ext missing) makes mamba_ssm take its fused path and CRASH with
+# "causal_conv1d_cuda is not available" — even the eager path then fails, since it also calls the
+# wrapper. So: clear any prior install, FORCE a from-source build (no cached wheel), verify the
+# CUDA ext actually imports, and if not, UNINSTALL it so mamba falls back to the safe eager conv.
+echo "Building causal-conv1d 1.4.0 into the .venv (from source; enables fused fast mamba) ..."
+uv pip uninstall --python "$VENV_PY" causal-conv1d >/dev/null 2>&1 || true
+if CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation --no-cache "causal-conv1d==1.4.0" \
+   && "$VENV_PY" -c "import causal_conv1d_cuda" >/dev/null 2>&1; then
+    echo "causal-conv1d OK: causal_conv1d_cuda imports (FUSED fast mamba)."
+else
+    echo "WARNING: causal_conv1d_cuda unavailable; UNINSTALLING causal-conv1d so mamba uses the" >&2
+    echo "         (slower but working) eager conv path instead of crashing on the fused path." >&2
+    uv pip uninstall --python "$VENV_PY" causal-conv1d >/dev/null 2>&1 || true
+fi
 
 # --- Dr.Jit/Mitsuba LLVM backend so `import sionna` works on ANY node ---------------------
 # Sionna's top-level import eagerly loads sionna.rt -> Mitsuba/Dr.Jit, which needs libLLVM.so
@@ -105,9 +118,20 @@ import sionna  # triggers sionna.rt -> Mitsuba/Dr.Jit; needs the LLVM backend on
 print("torch", torch.__version__, "| torch.cuda", torch.version.cuda,
       "| sionna", getattr(sionna, "__version__", "?"))
 from sionna.phy.channel.tr38901 import TDL  # noqa  (the PHY bits the pipeline actually uses)
-print("mamba-ssm installed:", importlib.util.find_spec("mamba_ssm") is not None)
-_cc = importlib.util.find_spec("causal_conv1d") is not None
-print("causal-conv1d installed:", _cc, "(FUSED fast mamba)" if _cc else "(SLOW unfused mamba path!)")
+def _imp(m):
+    try:
+        importlib.import_module(m); return True
+    except Exception:
+        return False
+print("mamba_ssm:", _imp("mamba_ssm"), "| selective_scan_cuda:", _imp("selective_scan_cuda"))
+# What matters for mamba is the COMPILED ext, not just the python wrapper. A python-only
+# causal_conv1d (no causal_conv1d_cuda) CRASHES mamba — setup removes it in that case.
+_cce = _imp("causal_conv1d_cuda")
+print("causal_conv1d_cuda:", _cce, "(FUSED fast mamba)" if _cce
+      else "(absent -> mamba uses eager conv path; OK, just slower)")
+if _imp("causal_conv1d") and not _cce:
+    print("  !! BAD STATE: causal_conv1d python wrapper present but CUDA ext missing -> mamba will"
+          " crash. Re-run setup_env.sh (it should have removed it).")
 print("NOTE: mamba_ssm import + CUDA run is validated by the first GPU job (02_pretrain).")
 print("-> setup OK")
 PY
