@@ -72,9 +72,13 @@ uv pip install --python "$VENV_PY" --no-build-isolation "mamba-ssm==2.3.0"
 # "causal_conv1d_cuda is not available" — even the eager path then fails, since it also calls the
 # wrapper. So: clear any prior install, FORCE a from-source build (no cached wheel), verify the
 # CUDA ext actually imports, and if not, UNINSTALL it so mamba falls back to the safe eager conv.
-echo "Building causal-conv1d 1.4.0 into the .venv (from source; enables fused fast mamba) ..."
+# Build from GIT, not PyPI: the causal-conv1d==1.4.0 PyPI sdist omits the csrc/*.cpp|*.cu sources,
+# so a from-source build fails with "csrc/causal_conv1d.cpp ... missing and no known rule to make
+# it". The GitHub tag ships the full csrc/, so the CUDA extension actually compiles.
+CC1D_GIT="git+https://github.com/Dao-AILab/causal-conv1d.git@v1.4.0"
+echo "Building causal-conv1d (from git $CC1D_GIT) into the .venv; enables fused fast mamba ..."
 uv pip uninstall --python "$VENV_PY" causal-conv1d >/dev/null 2>&1 || true
-if CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation --no-cache "causal-conv1d==1.4.0" \
+if CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation --no-cache "$CC1D_GIT" \
    && "$VENV_PY" -c "import causal_conv1d_cuda" >/dev/null 2>&1; then
     echo "causal-conv1d OK: causal_conv1d_cuda imports (FUSED fast mamba)."
 else
