@@ -19,9 +19,11 @@
 #SBATCH --time 0-08:00:00
 #SBATCH --job-name spectro-sweep
 #SBATCH --output cluster/logs/sweep-%J.out
-#SBATCH --gpus=1
+#SBATCH --gpus=rtx_3090:1
 #SBATCH --constraint=rtx_3090
 #SBATCH --mail-type=END,FAIL
+# typed --gpus=rtx_3090:1 pins the GPU MODEL (the bare --constraint was ignored -> 1080 Ti).
+# mamba-ssm/causal-conv1d are compiled for sm_86 only, so it MUST be rtx_3090.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,7 +31,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${SLURM_SUBMIT_DIR:-$HOME/lwm-competition-2025}/cluster/config.env"
 
 export PATH="$HOME/.local/bin:$PATH"     # uv
-module load cuda/12.4 || true
+# No cuda module needed at RUNTIME (torch bundles its 12.8 runtime; avoids a module load conflict).
 export PYTHONUNBUFFERED=TRUE
 cd "$REPO_ROOT"
 

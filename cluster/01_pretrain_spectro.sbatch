@@ -25,9 +25,13 @@
 #SBATCH --time 1-12:00:00
 #SBATCH --job-name spectro-pre
 #SBATCH --output cluster/logs/spectro-pre-%J.out
-#SBATCH --gpus=1
+#SBATCH --gpus=rtx_3090:1
 #SBATCH --constraint=rtx_3090
 #SBATCH --mail-type=END,FAIL
+# NOTE: typed --gpus=rtx_3090:1 (not bare --gpus=1) is what actually pins the GPU MODEL on this
+# cluster — the node-feature --constraint alone was ignored and landed jobs on a GTX 1080 Ti
+# (sm_61), which torch cu128 cannot run. Our mamba-ssm/causal-conv1d are compiled for sm_86 ONLY
+# (TORCH_CUDA_ARCH_LIST=8.6), so it MUST be rtx_3090. If rtx_3090 is busy the job will PEND.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -35,7 +39,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${SLURM_SUBMIT_DIR:-$HOME/lwm-competition-2025}/cluster/config.env"
 
 export PATH="$HOME/.local/bin:$PATH"     # uv
-module load cuda/12.4 || true
+# No cuda module needed at RUNTIME: torch's wheel bundles its 12.8 runtime and the compiled
+# mamba-ssm/causal-conv1d link against it. (A `module load cuda` here only risks a load conflict.)
 export PYTHONUNBUFFERED=TRUE
 # W&B: compute nodes may have no internet -> log offline, sync from the login node afterwards.
 export WANDB_MODE="${WANDB_MODE:-offline}"
