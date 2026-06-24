@@ -72,10 +72,13 @@ uv pip install --python "$VENV_PY" --no-build-isolation "mamba-ssm==2.3.0"
 # "causal_conv1d_cuda is not available" — even the eager path then fails, since it also calls the
 # wrapper. So: clear any prior install, FORCE a from-source build (no cached wheel), verify the
 # CUDA ext actually imports, and if not, UNINSTALL it so mamba falls back to the safe eager conv.
-# Build from GIT, not PyPI: the causal-conv1d==1.4.0 PyPI sdist omits the csrc/*.cpp|*.cu sources,
-# so a from-source build fails with "csrc/causal_conv1d.cpp ... missing and no known rule to make
-# it". The GitHub tag ships the full csrc/, so the CUDA extension actually compiles.
-CC1D_GIT="git+https://github.com/Dao-AILab/causal-conv1d.git@v1.4.0"
+# Build from GIT, not PyPI (the PyPI sdist omits csrc/*.cpp|*.cu, so a source build fails with
+# "csrc/causal_conv1d.cpp missing"). VERSION MATTERS: mamba_ssm 2.3.0 here imports
+# `from causal_conv1d.cpp_functions import causal_conv1d_fwd_function`, which only exists in
+# causal-conv1d >= 1.6.0. Older tags (1.4.0, 1.5.0.postN) build fine but the import silently
+# falls to the except branch -> causal_conv1d_fwd_function is None -> mamba CRASHES at the fused
+# path with "causal_conv1d_cuda is not available". v1.6.2.post1 verified working (fused, fast).
+CC1D_GIT="git+https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2.post1"
 echo "Building causal-conv1d (from git $CC1D_GIT) into the .venv; enables fused fast mamba ..."
 uv pip uninstall --python "$VENV_PY" causal-conv1d >/dev/null 2>&1 || true
 if CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python "$VENV_PY" --no-build-isolation --no-cache "$CC1D_GIT" \
@@ -128,14 +131,17 @@ def _imp(m):
     except Exception:
         return False
 print("mamba_ssm:", _imp("mamba_ssm"), "| selective_scan_cuda:", _imp("selective_scan_cuda"))
-# What matters for mamba is the COMPILED ext, not just the python wrapper. A python-only
-# causal_conv1d (no causal_conv1d_cuda) CRASHES mamba — setup removes it in that case.
-_cce = _imp("causal_conv1d_cuda")
-print("causal_conv1d_cuda:", _cce, "(FUSED fast mamba)" if _cce
-      else "(absent -> mamba uses eager conv path; OK, just slower)")
-if _imp("causal_conv1d") and not _cce:
-    print("  !! BAD STATE: causal_conv1d python wrapper present but CUDA ext missing -> mamba will"
-          " crash. Re-run setup_env.sh (it should have removed it).")
+# The TRUE test for mamba's fused path is mamba_ssm's own binding being non-None — not just that
+# causal_conv1d imports. (causal-conv1d<1.6.0 builds + imports but lacks cpp_functions, so the
+# binding silently stays None and mamba crashes at runtime.)
+_fused = False
+try:
+    import mamba_ssm.ops.selective_scan_interface as _si
+    _fused = _si.causal_conv1d_fwd_function is not None
+except Exception:
+    pass
+print("mamba fused path (causal_conv1d_fwd_function):", _fused,
+      "(FUSED fast mamba)" if _fused else "(NOT bound -> mamba uses eager/crashes; check causal-conv1d>=1.6.0)")
 print("NOTE: mamba_ssm import + CUDA run is validated by the first GPU job (02_pretrain).")
 print("-> setup OK")
 PY
