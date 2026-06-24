@@ -32,7 +32,7 @@ from deepmimo_channel import CITY_SCENARIOS, deepmimo_tdl_cir, extract_city_pdp 
 from phy_params import (CARRIER_FREQUENCY_HZ, MOBILITIES, MOBILITY_SPEED_MS, MOD_BITS,  # noqa: E402
                         MODULATIONS, PROTOCOL_CONFIGS, PROTOCOLS, SNRS_DB, snr_label)
 from sionna_blocks import DEVICE, _BINARY_SOURCE, _ofdm_chain  # noqa: E402
-from spectrogram import iq_batch_to_spectrogram  # noqa: E402
+from spectrogram import iq_batch_to_spectrogram, iq_batch_to_complex_spectrogram  # noqa: E402
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 _DEFAULT_OUT = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo')
@@ -66,6 +66,9 @@ def main():
     ap.add_argument('--shard-size', type=int, default=2000)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--smoke', action='store_true')
+    ap.add_argument('--complex', action='store_true',
+                    help='store (2,128,128) [real,imag] complex spectrograms (element_length=32) '
+                         'instead of (1,128,128) magnitude — the authors\' contrastive representation')
     args = ap.parse_args()
     if args.smoke:
         args.per_city = 20
@@ -116,7 +119,8 @@ def main():
                                    device=y.device).reshape(b, 1)
             no = p / snr_lin
             noise = torch.sqrt(no / 2) * torch.complex(torch.randn_like(y.real), torch.randn_like(y.real))
-            specs = iq_batch_to_spectrogram(y + noise).cpu()  # (b,1,128,128) float16
+            _spec_fn = iq_batch_to_complex_spectrogram if args.complex else iq_batch_to_spectrogram
+            specs = _spec_fn(y + noise).cpu()                 # (b,1,128,128) mag or (b,2,128,128) complex
             for j, i in enumerate(bi):
                 buffer.append({'tech': tech, 'snr': snr_label(int(snrs[i])), 'mod': mod,
                                'mob': mobs[i], 'city': CITY_SCENARIOS[city[i]], 'data': specs[j]})
@@ -132,6 +136,7 @@ def main():
 
     manifest = {'n_samples': made, 'shards': shard_paths, 'shard_size': args.shard_size,
                 'per_city': args.per_city, 'cities': CITY_SCENARIOS, 'seed': args.seed,
+                'complex': bool(args.complex),
                 'source': 'deepmimo-channel-spectrograms',
                 'note': 'OFDM waveforms through DeepMIMO ray-traced channels (delay/power/AoA) + AWGN -> STFT.'}
     with open(os.path.join(args.out, 'manifest.json'), 'w') as f:

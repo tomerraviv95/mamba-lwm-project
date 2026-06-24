@@ -17,8 +17,9 @@ class ProjectionHead(nn.Module):
     """SimCLR-style projection head: avg-pool over sequence -> MLP -> L2-normalized embedding.
     (Verbatim from the LWM-Spectro authors' train_lwm_spectro_contrastive.py.)"""
 
-    def __init__(self, d_model: int, projection_dim: int = 128):
+    def __init__(self, d_model: int, projection_dim: int = 128, pool: str = "mean"):
         super().__init__()
+        self.pool = pool                  # 'mean' (authors) or 'cls' (token 0 — keeps local structure)
         self.projection = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.ReLU(),
@@ -26,7 +27,7 @@ class ProjectionHead(nn.Module):
         )
 
     def forward(self, x):
-        pooled = x.mean(dim=1)            # (batch, d_model)
+        pooled = x[:, 0] if self.pool == "cls" else x.mean(dim=1)   # (batch, d_model)
         z = self.projection(pooled)       # (batch, projection_dim)
         return F.normalize(z, dim=1)      # L2 normalize
 

@@ -46,8 +46,10 @@ from contrastive import ProjectionHead, supervised_contrastive_loss  # noqa: E40
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 
-# Authors' contrastive loss weights (train_lwm_spectro_contrastive.py): MLM=1, mod=50, mob=30.
-W_MLM, W_MOD, W_MOB = 1.0, 50.0, 30.0
+# LWM-Spectro PAPER loss weights (Table I): lambda_recon=1.0, lambda_cont=0.3. (The released CODE
+# uses 50/30 because its MLM is sum-reduced ~hundreds; our contrastive path uses mean-MLM ~1.0, so
+# the paper's 0.3 is the correct gentle weight — verified: contrastive descends + helps downstream.)
+W_MLM, W_MOD, W_MOB = 1.0, 0.3, 0.3
 
 
 def weights_dir(arch: str) -> str:
@@ -63,7 +65,8 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
                     batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0,
                     warmup_frac=0.1, weight_decay=0.0, min_lr=1e-5, accum_steps=1,
                     contrastive=False, mod=None, mob=None, w_mlm=W_MLM, w_mod=W_MOD, w_mob=W_MOB,
-                    proj_dim=128, wandb_run=None, tag=''):
+                    proj_dim=128, proj_pool='mean', temperature=0.2, element_length=16,
+                    wandb_run=None, tag=''):
     """Pretrain one expert (``arch``). MLM, or MLM+SupCon when ``contrastive``. Returns best state."""
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
     n = ids.shape[0]
@@ -84,12 +87,12 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
     tr_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True, drop_last=contrastive)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
-    model = build_expert(arch, d_model=d_model, n_layers=n_layers).to(device)
+    model = build_expert(arch, d_model=d_model, n_layers=n_layers, element_length=element_length).to(device)
     params = list(model.parameters())
     proj_mod = proj_mob = None
     if contrastive:
-        proj_mod = ProjectionHead(d_model, proj_dim).to(device)
-        proj_mob = ProjectionHead(d_model, proj_dim).to(device)
+        proj_mod = ProjectionHead(d_model, proj_dim, pool=proj_pool).to(device)
+        proj_mob = ProjectionHead(d_model, proj_dim, pool=proj_pool).to(device)
         params += list(proj_mod.parameters()) + list(proj_mob.parameters())
 
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
@@ -113,8 +116,10 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
             b_ids, b_toks, b_pos, b_mod, b_mob = (t.to(device) for t in batch)
             logits, output = model(b_ids, b_pos)
             mlm = mse_mean(logits, b_toks)
-            sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod)
-            sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob)
+            sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod,
+                                                 temperature=temperature, base_temperature=temperature)
+            sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob,
+                                                 temperature=temperature, base_temperature=temperature)
             total = w_mlm * mlm + w_mod * sc_mod + w_mob * sc_mob
             comp = {'mlm': mlm.item(), 'sc_mod': sc_mod.item(), 'sc_mob': sc_mob.item(),
                     'total': total.item()}
@@ -270,18 +275,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--d-model', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=12)
-    ap.add_argument('--mask-percent', type=float, default=0.6)
+    ap.add_argument('--mask-percent', type=float, default=0.7)   # paper Table I: 70%
     ap.add_argument('--epochs', type=int, default=30)
     ap.add_argument('--router-epochs', type=int, default=15)
     ap.add_argument('--lr', type=float, default=5e-4)
-    ap.add_argument('--min-lr', type=float, default=1e-5)
+    ap.add_argument('--min-lr', type=float, default=1e-8)        # paper: cosine decay to 1e-8
     ap.add_argument('--batch-size', type=int, default=32)
     ap.add_argument('--accum-steps', type=int, default=1,
                     help='gradient accumulation (effective batch = batch-size * accum-steps)')
-    ap.add_argument('--warmup-frac', type=float, default=0.1,
-                    help='fraction of epochs for linear LR warmup (authors use 5/20=0.25 w/ contrastive)')
-    ap.add_argument('--weight-decay', type=float, default=0.0,
-                    help='AdamW weight decay (authors use 0.05 for the contrastive recipe)')
+    ap.add_argument('--warmup-frac', type=float, default=0.25,
+                    help='fraction of epochs for linear LR warmup (paper: 5-epoch warmup)')
+    ap.add_argument('--temperature', type=float, default=0.2, help='SupCon temperature (paper Table I: 0.2)')
+    ap.add_argument('--weight-decay', type=float, default=0.05,
+                    help='AdamW weight decay (paper Table I: 0.05)')
     ap.add_argument('--grad-clip', type=float, default=1.0,
                     help='max grad norm (0 disables); guards against late-training MSE spikes')
     ap.add_argument('--seed', type=int, default=42)
@@ -334,7 +340,7 @@ def main():
             warmup_frac=args.warmup_frac, weight_decay=args.weight_decay, accum_steps=args.accum_steps,
             contrastive=args.contrastive, mod=mod, mob=mob,
             w_mlm=args.w_mlm, w_mod=args.w_mod, w_mob=args.w_mob, proj_dim=args.proj_dim,
-            wandb_run=wandb_run, tag=proto)
+            temperature=args.temperature, wandb_run=wandb_run, tag=proto)
         path = os.path.join(out_dir, f"{proto}_expert.pth")
         torch.save({'state_dict': state, 'val': val, 'arch': args.arch, 'contrastive': args.contrastive,
                     'd_model': args.d_model, 'n_layers': args.n_layers}, path)

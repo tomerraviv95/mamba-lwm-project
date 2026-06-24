@@ -66,3 +66,28 @@ def iq_batch_to_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int 
         std = torch.clamp(db.std(dim=(1, 2, 3), keepdim=True), min=1e-6)
         db = (db - mean) / std
     return db.to(torch.float16)                                    # (n,1,out,out)
+
+
+def iq_batch_to_complex_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int = OUT_SIZE,
+                                    normalize: bool = True) -> torch.Tensor:
+    """Batched COMPLEX spectrogram: (n, T) complex -> (n, 2, out, out) float16 [real, imag].
+
+    The LWM-Spectro authors pretrain on complex spectrograms (real+imag interleaved,
+    element_length=32) rather than the magnitude/dB representation. Here we keep the real and
+    imaginary STFT components as two channels (resized + per-sample z-scored jointly across both
+    channels). ``spectro_patchify`` turns a (2,128,128) sample into 4x4x2 = 32-dim patch tokens.
+    """
+    if not torch.is_complex(iq):
+        iq = iq.to(torch.complex64)
+    n_frames_target = out_size + 4
+    hop = max(1, (iq.shape[-1] - n_fft) // n_frames_target)
+    window = torch.hann_window(n_fft, device=iq.device)
+    spec = torch.stft(iq, n_fft=n_fft, hop_length=hop, win_length=n_fft, window=window,
+                      center=True, return_complex=True)            # (n, freq, frames)
+    ri = torch.stack([spec.real, spec.imag], dim=1)                # (n, 2, F, T)
+    ri = F.interpolate(ri, size=(out_size, out_size), mode="bilinear", align_corners=False)
+    if normalize:
+        mean = ri.mean(dim=(1, 2, 3), keepdim=True)
+        std = torch.clamp(ri.std(dim=(1, 2, 3), keepdim=True), min=1e-6)
+        ri = (ri - mean) / std
+    return ri.to(torch.float16)                                    # (n,2,out,out)

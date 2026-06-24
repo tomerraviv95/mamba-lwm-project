@@ -79,7 +79,7 @@ uv run --no-sync python spectro/scripts/spectro_pretrain.py \
     --mask-percent "$MASK_PERCENT" \
     --batch-size "$BATCH" \
     --accum-steps "$ACCUM" \
-    --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" \
+    --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" --temperature "$SPECTRO_TEMP" \
     --warmup-frac "$SPECTRO_WARMUP" --weight-decay "$SPECTRO_WD" \
     --seed "$SEED" \
     --wandb --wandb-project "$WANDB_PROJECT" --run-name "spectro-${ARCH}"

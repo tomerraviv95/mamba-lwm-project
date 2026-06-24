@@ -34,33 +34,43 @@ def normalize_per_sample(spec: np.ndarray) -> np.ndarray:
     return (spec - mean) / denom
 
 
+def _patchify_2d(spec: np.ndarray, patch: int) -> np.ndarray:
+    """(H,W) -> (n_patches, patch*patch) row-major 4x4 patch flatten."""
+    n_rows, n_cols = spec.shape
+    n_pr, n_pc = n_rows // patch, n_cols // patch
+    cropped = spec[: n_pr * patch, : n_pc * patch]
+    reshaped = cropped.reshape(n_pr, patch, n_pc, patch)
+    return reshaped.transpose(0, 2, 1, 3).reshape(-1, patch * patch)
+
+
 def spectrogram_patchify(specs, patch: int = PATCH, normalize: bool = True) -> np.ndarray:
-    """Turn spectrograms into 4x4 patch tokens.
+    """Turn spectrograms into 4x4 patch tokens (single- or multi-channel).
 
     Args:
-        specs: array/tensor of shape (N,128,128), (N,1,128,128), or a single (128,128).
+        specs: array/tensor of shape (N,128,128), (N,1,128,128), a single (128,128), or
+            (N,2,128,128) for COMPLEX [real, imag] spectrograms.
         patch: patch side length (default 4).
-        normalize: apply per-sample z-score before patchifying.
+        normalize: per-sample z-score (over all channels jointly) before patchifying.
 
     Returns:
-        ``np.ndarray`` of shape (N, n_patches, patch*patch), e.g. (N, 1024, 16) for 128x128.
+        ``np.ndarray`` (N, n_patches, patch*patch*C): (N,1024,16) for magnitude, (N,1024,32) for
+        complex (real patch flat ++ imag patch flat).
     """
     if torch.is_tensor(specs):
         specs = specs.detach().cpu().numpy()
     specs = np.asarray(specs, dtype=np.float32)
-    if specs.ndim == 2:
-        specs = specs[None, ...]
+    if specs.ndim == 2:                 # (H,W) -> (1,1,H,W)
+        specs = specs[None, None, ...]
+    elif specs.ndim == 3:               # (N,H,W) single channel -> (N,1,H,W)
+        specs = specs[:, None, ...]
+    # now (N, C, H, W) with C in {1, 2}
     out = []
-    for spec in specs:
-        spec = _as_2d(spec)
+    for spec in specs:                  # spec: (C,H,W)
         if normalize:
-            spec = normalize_per_sample(spec)
-        n_rows, n_cols = spec.shape
-        n_pr, n_pc = n_rows // patch, n_cols // patch
-        cropped = spec[: n_pr * patch, : n_pc * patch]
-        # (n_pr, patch, n_pc, patch) -> (n_pr, n_pc, patch, patch) -> (n_patches, patch*patch)
-        reshaped = cropped.reshape(n_pr, patch, n_pc, patch)
-        result = reshaped.transpose(0, 2, 1, 3).reshape(-1, patch * patch)
+            mean = float(spec.mean()); std = float(spec.std())
+            spec = (spec - mean) / (std if abs(std) > 1e-6 else 1e-6)
+        chans = [_patchify_2d(ch, patch) for ch in spec]          # each (n_patches, patch*patch)
+        result = np.concatenate(chans, axis=-1)                   # (n_patches, patch*patch*C)
         out.append(result.astype(np.float32, copy=False))
     return np.stack(out, axis=0)
 
@@ -80,7 +90,10 @@ def make_sample_spectro(patches: np.ndarray, n_masks: int, mask: bool = True,
         Else ``[input_ids, masked_tokens (n_masks, E), masked_pos (n_masks,)]``.
     """
     rng = rng or np.random.default_rng()
-    input_ids = np.vstack((CLS_TOKEN, patches)).astype(np.float32)
+    E = patches.shape[1]                                  # element_length (16 magnitude / 32 complex)
+    cls_tok = np.full(E, 0.2, dtype=np.float32)
+    mask_tok = np.full(E, 0.1, dtype=np.float32)
+    input_ids = np.vstack((cls_tok, patches)).astype(np.float32)
     if not mask:
         return input_ids
 
@@ -96,11 +109,11 @@ def make_sample_spectro(patches: np.ndarray, n_masks: int, mask: bool = True,
         masked_tokens.append(input_ids[pos].astype(np.float32, copy=True))
         rnd = rng.random()
         if rnd < 0.1:
-            input_ids[pos] = rng.random(ELEMENT_LENGTH).astype(np.float32)
+            input_ids[pos] = rng.random(E).astype(np.float32)
         elif rnd < 0.9:
-            input_ids[pos] = MASK_TOKEN
+            input_ids[pos] = mask_tok
     masked_tokens = (np.stack(masked_tokens).astype(np.float32)
-                     if masked_tokens else np.empty((0, ELEMENT_LENGTH), dtype=np.float32))
+                     if masked_tokens else np.empty((0, E), dtype=np.float32))
     return [input_ids, masked_tokens, masked_pos.astype(np.int64)]
 
 

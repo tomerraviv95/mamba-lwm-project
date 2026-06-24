@@ -82,10 +82,9 @@ class SpectroMoE(nn.Module):
     @torch.no_grad()
     def _expert_embed(self, protocol: str, specs: torch.Tensor) -> torch.Tensor:
         """Patchify + run a single expert on a (b,128,128) spectrogram batch -> (b,d_model)."""
-        patches = spectrogram_patchify(specs, normalize=True)        # (b,1024,16)
-        # prepend CLS token (0.2*ones) to match pretraining tokenization
-        from spectro_patchify import CLS_TOKEN
-        cls = np.broadcast_to(CLS_TOKEN, (patches.shape[0], 1, patches.shape[2]))
+        patches = spectrogram_patchify(specs, normalize=True)        # (b,1024,E) E=16 mag / 32 complex
+        # prepend CLS token (0.2*ones, sized to the element_length) to match pretraining tokenization
+        cls = np.full((patches.shape[0], 1, patches.shape[2]), 0.2, dtype=np.float32)
         input_ids = torch.tensor(np.concatenate([cls, patches], axis=1), dtype=torch.float32,
                                  device=specs.device)
         return self.experts[protocol].embed(input_ids, pool=self.pool)
