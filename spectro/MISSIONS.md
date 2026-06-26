@@ -1,0 +1,84 @@
+# Spectro Missions — strengthening & verifying the transformer-vs-mamba result
+
+Post-validation work to harden the LWM-Spectro spectrogram study. Each mission has a goal, status,
+concrete steps, the run-log paths, and a findings section filled in as we go.
+
+**Context (current validated result — single seed, patch=4, magnitude, paper recipe):**
+Downstream demo accuracy @100% train (router routing), vs raw floor and the published baseline:
+
+| task | raw | TF-baseline(pub) | TF-ours | mamba-ours |
+|---|---|---|---|---|
+| modulation | 0.58 | 0.96 | 0.91 | 0.90 |
+| SNR | 0.38 | 1.00 | 0.85 | 0.84 |
+| **mobility** | **0.38** | **0.69** | **0.38** | **0.45** |
+
+Both backbones beat raw on mod+SNR and tie each other; **mobility shows ~no gain (≈ raw floor)** — M1.
+Recipe: `spectro_pretrain_real.py` (step-based, demo-probe every 2000 steps); paper Table I
+(λ_recon=1.0, λ_cont=0.3, τ=0.2, mask 0.7, AdamW wd=0.05, lr 5e-4 warmup→cosine 1e-8).
+Checkpoints: HF `tomerraviv95/wimamba-spectro-ckpts`; W&B offline `real-transformer`/`real-mamba`.
+
+---
+
+## M1 — Fix the mobility task (no downstream gain)  ·  STATUS: IN PROGRESS
+**Problem:** our pretrained models sit at the raw floor on mobility (~0.38), while the published
+baseline reaches 0.69. `sc_mob` (mobility contrastive) stayed frozen at ln(batch) the entire run.
+**Goal:** after re-pretraining BOTH arches, see *some* mobility gain over raw (below 0.69 is fine).
+
+Steps:
+- [ ] **Diagnose** whether mobility is recoverable from the magnitude spectrogram at all
+      (probe demo + synthetic with mean/std AND temporal-structure features; mobility = Doppler →
+      lives in time-coherence across STFT frames, not in pooled stats).
+- [ ] **Check the generator** encodes mobility distinguishably (static vs pedestrian vs vehicular
+      Doppler → measurable spectrogram difference). If washed out: fix gen (more time frames /
+      keep Doppler structure / less aggressive normalization).
+- [ ] **Pick a fix** (one or more of): (a) generator preserves Doppler, (b) contrast on mobility
+      with a representation where it's accessible, (c) a temporal-aware feature for the head.
+- [ ] **Re-pretrain** both arches on a small subset, confirm mobility > raw in the before/after probe.
+- [ ] **Sweep** to confirm the mobility gain holds on the full demo eval.
+Run logs: `cluster/logs/m1_*.log`
+Findings: _(to fill)_
+
+---
+
+## M2 — Add a `random-init` arm to the sweep  ·  STATUS: TODO
+**Goal:** put the pretraining "lift" explicitly on the same axes as raw / pub-baseline / ours.
+Steps:
+- [ ] Add `random_init` arm to `spectro_train_heads.py` (`_MOE_ARMS`-style, untrained MoE, fixed seed).
+- [ ] Include it in `02_downstream_spectro.sbatch` ARMS and the plot's MODEL_TYPES.
+- [ ] Re-run the sweep; confirm ordering raw ≤ random_init ≤ ours ≤ pub-baseline.
+Run logs: `cluster/logs/m2_*.log`
+Findings: _(to fill)_
+
+---
+
+## M3 — Patch-size-parameterized pretrain + downstream (patch ∈ {4,6,8})  ·  STATUS: TODO
+**Goal:** run pretraining/downstream with a chosen patch size; **persist patch size in every
+output name + config** so runs are retrievable later. (patch 4→element16/seq1025, 6→36/441,
+8→64/257; expert `element_length` and `max_len` must follow the patch.)
+Steps:
+- [ ] Thread `--patch` through patchify (`spectrogram_patchify`/`build_masked_tensors`),
+      `build_expert` (element_length, max_len), `spectro_pretrain_real.py`, the sweep, the MoE.
+- [ ] Weights dir → `spectro_{arch}_p{patch}_weights/`; sweep submissions →
+      `submission_spectro_{arm}_p{patch}/`; record `patch` in every saved config/manifest + W&B/run name.
+- [ ] Provide BOTH a local launcher and a cluster sbatch parameterized by `PATCH` (env), runnable
+      for either pretraining or downstream, on whichever target the user picks.
+- [ ] Smoke each of patch 4/6/8 (shapes + one short run).
+Run logs: `cluster/logs/m3_p{4,6,8}_*.log`
+Findings: _(to fill)_
+
+---
+
+## M4 — 2 more seeds per patch size (after M3 validates)  ·  STATUS: TODO
+**Goal:** statistical confidence — run 2 additional seeds for each patch size; report mean ± 95% CI.
+Steps:
+- [ ] For each validated patch size, re-run pretrain+downstream with 2 more seeds (seed in name/config).
+- [ ] Aggregate mean ± CI per (patch, arch, task); update the plot with error bars.
+Run logs: `cluster/logs/m4_p{patch}_seed{N}_*.log`
+Findings: _(to fill)_
+
+---
+
+### Conventions
+- Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
+- Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.
+- Update each mission's STATUS (TODO → IN PROGRESS → DONE) and Findings as we go.
