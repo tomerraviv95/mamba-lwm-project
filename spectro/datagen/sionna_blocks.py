@@ -30,10 +30,14 @@ from phy_params import (CARRIER_FREQUENCY_HZ, MOBILITY_SPEED_MS, MOD_BITS, Proto
 _BINARY_SOURCE = BinarySource().to(DEVICE)
 
 
-def build_resource_grid(cfg: ProtocolConfig) -> ResourceGrid:
-    """No-pilot OFDM resource grid for a protocol (all subcarriers carry data; DC nulled)."""
+def build_resource_grid(cfg: ProtocolConfig, symbol_mult: int = 1) -> ResourceGrid:
+    """No-pilot OFDM resource grid for a protocol (all subcarriers carry data; DC nulled).
+
+    ``symbol_mult`` lengthens the burst (more OFDM symbols) so the STFT window spans enough slow-time
+    for Doppler/mobility to appear across frames (burst must exceed the Doppler coherence time).
+    """
     return ResourceGrid(
-        num_ofdm_symbols=cfg.num_ofdm_symbols,
+        num_ofdm_symbols=cfg.num_ofdm_symbols * symbol_mult,
         fft_size=cfg.fft_size,
         subcarrier_spacing=cfg.subcarrier_spacing,
         cyclic_prefix_length=cfg.cyclic_prefix_length,
@@ -43,11 +47,11 @@ def build_resource_grid(cfg: ProtocolConfig) -> ResourceGrid:
 
 
 @functools.lru_cache(maxsize=None)
-def _ofdm_chain(tech: str, modulation: str):
-    """Cache the (resource grid, mapper, rg-mapper, modulator) for a (tech, modulation)."""
+def _ofdm_chain(tech: str, modulation: str, symbol_mult: int = 1):
+    """Cache the (resource grid, mapper, rg-mapper, modulator) for a (tech, modulation, symbol_mult)."""
     from phy_params import PROTOCOL_CONFIGS
     cfg = PROTOCOL_CONFIGS[tech]
-    rg = build_resource_grid(cfg)
+    rg = build_resource_grid(cfg, symbol_mult)
     bits = MOD_BITS[modulation]
     ctype = "pam" if modulation == "BPSK" else "qam"   # BPSK -> 2-PAM (1 bit), else QAM
     mapper = Mapper(ctype, bits).to(DEVICE)

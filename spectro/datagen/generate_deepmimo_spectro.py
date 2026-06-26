@@ -66,6 +66,10 @@ def main():
     ap.add_argument('--shard-size', type=int, default=2000)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--smoke', action='store_true')
+    ap.add_argument('--symbol-mult', type=int, default=1,
+                    help='multiply OFDM symbols per burst -> longer slow-time window so Doppler/mobility '
+                         'shows across STFT frames (burst must exceed Doppler coherence time). Memory '
+                         'scales with this; lower --batch accordingly.')
     ap.add_argument('--complex', action='store_true',
                     help='store (2,128,128) [real,imag] complex spectrograms (element_length=32) '
                          'instead of (1,128,128) magnitude — the authors\' contrastive representation')
@@ -96,7 +100,7 @@ def main():
     for (tech, mod), idxs in groups.items():
         cfg = PROTOCOL_CONFIGS[tech]
         sr = cfg.sample_rate
-        rg, mapper, rg_mapper, modulator = _ofdm_chain(tech, mod)
+        rg, mapper, rg_mapper, modulator = _ofdm_chain(tech, mod, args.symbol_mult)
         l_min, l_max = time_lag_discrete_time_channel(sr)
         l_tot = l_max - l_min + 1
         apply = None
@@ -136,7 +140,7 @@ def main():
 
     manifest = {'n_samples': made, 'shards': shard_paths, 'shard_size': args.shard_size,
                 'per_city': args.per_city, 'cities': CITY_SCENARIOS, 'seed': args.seed,
-                'complex': bool(args.complex),
+                'complex': bool(args.complex), 'symbol_mult': args.symbol_mult,
                 'source': 'deepmimo-channel-spectrograms',
                 'note': 'OFDM waveforms through DeepMIMO ray-traced channels (delay/power/AoA) + AWGN -> STFT.'}
     with open(os.path.join(args.out, 'manifest.json'), 'w') as f:

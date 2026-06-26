@@ -36,7 +36,20 @@ Steps:
 - [ ] **Re-pretrain** both arches on a small subset, confirm mobility > raw in the before/after probe.
 - [ ] **Sweep** to confirm the mobility gain holds on the full demo eval.
 Run logs: `cluster/logs/m1_*.log`
-Findings: _(to fill)_
+Findings:
+- **ROOT CAUSE = generator, not architecture.** Mobility probe (linear, 3-class, chance 0.333):
+  DEMO(real) pooled=0.333 but **temporal features=0.465** (mobility lives in time-variation across
+  STFT frames). SYNTH(mine) ≈ chance (0.31–0.32) for **every** feature → my spectrograms encode
+  NO mobility signal. So no model can learn it from my corpus.
+- **Why:** OFDM burst is ~0.5–0.9 ms but Doppler coherence time is ~1.4 ms (vehicular, 350 Hz) to
+  ~40 ms (pedestrian) — burst << coherence ⇒ channel ~constant across the STFT window ⇒ no Doppler
+  signature. (phy_params: WiFi 160 sym/0.64ms, LTE 12/0.86ms, 5G 12/0.43ms; speeds static0/ped1/veh30.)
+- **Fix = lengthen the observed time** so Doppler varies across the 128 STFT frames. Implemented
+  `--symbol-mult` (sionna_blocks `build_resource_grid`/`_ofdm_chain` + generator + manifest).
+- **VALIDATED at data level:** mult=8 (~5 ms window) → synthetic mobility temporal-probe **0.445**
+  (vs 0.340 at mult=1, vs demo 0.465). Gen cheap: 1000 samples / 35 s, no OOM at batch 4.
+- **Remaining:** generate a proper mult=8 corpus, re-pretrain both arches, confirm mobility downstream
+  on demo > raw floor (transfer through pretraining). Then M1 DONE.
 
 ---
 
