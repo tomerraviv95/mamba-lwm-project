@@ -19,17 +19,22 @@ class ProjectionHead(nn.Module):
 
     def __init__(self, d_model: int, projection_dim: int = 128, pool: str = "mean"):
         super().__init__()
-        self.pool = pool                  # 'mean' (authors) or 'cls' (token 0 — keeps local structure)
+        self.pool = pool      # 'mean'/'cls' (d_model) or 'meanstd_t' (2*d_model: keeps temporal/Doppler)
+        in_dim = 2 * d_model if pool == "meanstd_t" else d_model
         self.projection = nn.Sequential(
-            nn.Linear(d_model, d_model),
+            nn.Linear(in_dim, d_model),
             nn.ReLU(),
             nn.Linear(d_model, projection_dim),
         )
 
     def forward(self, x):
-        pooled = x[:, 0] if self.pool == "cls" else x.mean(dim=1)   # (batch, d_model)
-        z = self.projection(pooled)       # (batch, projection_dim)
-        return F.normalize(z, dim=1)      # L2 normalize
+        if self.pool == "meanstd_t":
+            from spectro_backbones import pool_tokens   # lazy: avoids datagen<->scripts import cycle
+            pooled = pool_tokens(x, "meanstd_t")        # (batch, 2*d_model)
+        else:
+            pooled = x[:, 0] if self.pool == "cls" else x.mean(dim=1)   # (batch, d_model)
+        z = self.projection(pooled)
+        return F.normalize(z, dim=1)
 
 
 def supervised_contrastive_loss(embeddings: torch.Tensor, labels: torch.Tensor,

@@ -62,7 +62,7 @@ def downstream_one(moe, data, task, device, extract_batch, eval_subset, seed):
     pos = {g: i for i, g in enumerate(keep)}
     tri = torch.as_tensor([pos[g] for g in tr]); vai = torch.as_tensor([pos[g] for g in va])
     tei = torch.as_tensor([pos[g] for g in te])
-    _, _, s, _, _ = finetune(ClassificationHead(128, data.n_classes(task)),
+    _, _, s, _, _ = finetune(ClassificationHead(F.shape[1], data.n_classes(task)),
                              F[tri], y[tri], F[vai], y[vai], F[tei], y[tei], score_fn=_acc,
                              epochs=100, lr=1e-3, batch_size=128, patience=20, device=device)
     return s
@@ -85,6 +85,12 @@ def main():
     ap.add_argument('--proj-pool', choices=['mean', 'cls'], default='mean',
                     help="projection-head pooling: 'mean' (authors) or 'cls' (keeps local structure)")
     ap.add_argument('--temperature', type=float, default=0.2, help='SupCon temperature (paper: 0.2)')
+    ap.add_argument('--pool', choices=['mean', 'cls', 'meanstd_t'], default='mean',
+                    help="downstream embedding pooling: 'meanstd_t' adds per-freq temporal-std "
+                         "(keeps Doppler/mobility that mean-pooling discards)")
+    ap.add_argument('--mob-pool', choices=['mean', 'cls', 'meanstd_t'], default='mean',
+                    help="pooling for the MOBILITY contrastive head ('meanstd_t' lets sc_mob engage "
+                         "the temporal Doppler signal so pretraining can organize mobility)")
     ap.add_argument('--epochs', type=int, default=10)
     ap.add_argument('--batch-size', type=int, default=None)
     ap.add_argument('--mask-percent', type=float, default=0.6)
@@ -129,14 +135,14 @@ def main():
 
     print("\n[baseline] random-init experts -> downstream ...")
     moe0 = SpectroMoE(PROTOCOLS, d_model=128, arch=args.arch, n_layers=args.n_layers,
-                      element_length=element_length)
+                      element_length=element_length, pool=args.pool)
     base = downstream_one(moe0, eval_data, args.task, device, extract_batch, args.eval_subset, args.seed)
     print(f"  random-init  {args.task} acc = {base:.4f}")
     del moe0; torch.cuda.empty_cache()
 
     print("\n[train] fixed-data contrastive per expert ...")
     moe1 = SpectroMoE(PROTOCOLS, d_model=128, arch=args.arch, n_layers=args.n_layers,
-                      element_length=element_length)
+                      element_length=element_length, pool=args.pool)
     for p_idx, proto in enumerate(PROTOCOLS):
         sel = (pre.protocol == p_idx) & pretrain_mask
         specs = pre.spectrograms[torch.as_tensor(sel)]
@@ -151,8 +157,8 @@ def main():
             epochs=args.epochs, lr=5e-4, min_lr=1e-8, batch_size=batch, device=device, seed=args.seed,
             warmup_frac=args.warmup_frac, weight_decay=args.weight_decay, patience=10**9,
             contrastive=True, mod=a, mob=b, w_mlm=args.w_mlm, w_mod=args.w_a, w_mob=args.w_b,
-            element_length=element_length, proj_pool=args.proj_pool, temperature=args.temperature,
-            tag=proto)
+            element_length=element_length, proj_pool=args.proj_pool, mob_pool=args.mob_pool,
+            temperature=args.temperature, tag=proto)
         moe1.experts[proto].load_state_dict(state)
         del state; torch.cuda.empty_cache()
 

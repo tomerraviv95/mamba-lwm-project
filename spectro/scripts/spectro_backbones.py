@@ -58,8 +58,33 @@ class TransformerExpert(nn.Module):
 
     @torch.no_grad()
     def embed(self, input_ids, pool: str = "mean") -> torch.Tensor:
-        output = self.net(input_ids)
-        return output[:, 0] if pool == "cls" else output.mean(dim=1)
+        return pool_tokens(self.net(input_ids), pool)
+
+
+def pool_tokens(output: 'torch.Tensor', pool: str = "mean") -> 'torch.Tensor':
+    """Pool encoder output (B, T, d) -> embedding. T = 1 CLS + n_patches (patches on a freq x time grid).
+
+    - 'mean' / 'cls': (B, d).
+    - 'meanstd_t': (B, 2d) = [mean over patches] ++ [std over TIME-blocks per freq, meaned over freq].
+      The temporal-std term keeps the per-frequency time-variation that encodes Doppler/mobility,
+      which plain mean-pooling discards.
+    """
+    if pool == "cls":
+        return output[:, 0]
+    if pool == "mean":
+        return output.mean(dim=1)
+    if pool == "meanstd_t":
+        enc = output[:, 1:]                                   # drop CLS -> (B, P, d)
+        B, P, d = enc.shape
+        mean = enc.mean(dim=1)
+        side = int(round(P ** 0.5))
+        if side * side == P:
+            g = enc.reshape(B, side, side, d)                 # (B, freq, time, d)
+            tstd = g.std(dim=2).mean(dim=1)                   # std over time per freq -> mean over freq
+        else:
+            tstd = enc.std(dim=1)
+        return torch.cat([mean, tstd], dim=-1)                # (B, 2d)
+    return output.mean(dim=1)
 
 
 def build_expert(arch: str, *, d_model=128, n_layers=12, element_length=16, max_len=1025,

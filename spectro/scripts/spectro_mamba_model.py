@@ -76,8 +76,6 @@ class lwm_mamba_spectro(nn.Module):
 
     @torch.no_grad()
     def embed(self, input_ids, pool: str = "mean") -> torch.Tensor:
-        """Extract a (B, d_model) embedding. ``pool`` in {'mean','cls'}."""
-        output = self.forward(input_ids)
-        if pool == "cls":
-            return output[:, 0]
-        return output.mean(dim=1)
+        """Extract an embedding. ``pool`` in {'mean','cls','meanstd_t'} (meanstd_t -> 2*d_model)."""
+        from spectro_backbones import pool_tokens   # lazy import to avoid the build_expert cycle
+        return pool_tokens(self.forward(input_ids), pool)

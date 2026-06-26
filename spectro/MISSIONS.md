@@ -19,7 +19,24 @@ Checkpoints: HF `tomerraviv95/wimamba-spectro-ckpts`; W&B offline `real-transfor
 
 ---
 
-## M1 — Fix the mobility task (no downstream gain)  ·  STATUS: IN PROGRESS
+## M1 — Fix the mobility task (no downstream gain)  ·  STATUS: DIAGNOSED; PARTIAL FIX (awaiting decision)
+**CONCLUSION:** root causes fully found; mobility is now **recoverable above the 0.38 floor (~0.42–0.44)**
+via data + readout fixes, but **pretraining itself does not drive the mobility gain** (objective can't
+capture it cheaply). Best config: **mult=8 corpus + `meanstd_t` downstream pooling, plain mean contrastive**
+(do NOT use the temporal mobility contrastive — it hurt: TF 0.42→0.37, mamba 0.44→0.42).
+Mobility results (demo, before→after pretrain):
+  mean-pool:      TF 0.36→0.34, mamba 0.42→0.35   (both below/at floor)
+  meanstd_t:      TF 0.42→0.44, mamba 0.44→0.38   (cleared floor; pretrain ~neutral)
+  meanstd_t+mobSupCon: TF 0.42→0.37, mamba 0.44→0.42  (worse — sc_mob never bootstraps)
+Three causes: (1) gen didn't encode Doppler (burst<<coherence) → FIXED `--symbol-mult` (mult=8).
+(2) mean-pool readout discards temporal mobility → FIXED `meanstd_t` pooling (mean++per-freq std-over-time).
+(3) pretraining objective doesn't target mobility & sc_mob can't bootstrap (degenerate gradient even
+with temporal pooling) → NOT fixed cheaply; would need complex spectrograms (authors' rep) — deferred.
+**Decision needed:** accept data+readout win (mobility clears floor; document the pretrain-objective
+limit) and move to M2, vs invest in complex spectrograms to make pretraining capture mobility.
+
+(original notes below)
+## M1 — Fix the mobility task (no downstream gain)  ·  (working notes)
 **Problem:** our pretrained models sit at the raw floor on mobility (~0.38), while the published
 baseline reaches 0.69. `sc_mob` (mobility contrastive) stayed frozen at ln(batch) the entire run.
 **Goal:** after re-pretraining BOTH arches, see *some* mobility gain over raw (below 0.69 is fine).
@@ -48,8 +65,18 @@ Findings:
   `--symbol-mult` (sionna_blocks `build_resource_grid`/`_ofdm_chain` + generator + manifest).
 - **VALIDATED at data level:** mult=8 (~5 ms window) → synthetic mobility temporal-probe **0.445**
   (vs 0.340 at mult=1, vs demo 0.465). Gen cheap: 1000 samples / 35 s, no OOM at batch 4.
-- **Remaining:** generate a proper mult=8 corpus, re-pretrain both arches, confirm mobility downstream
-  on demo > raw floor (transfer through pretraining). Then M1 DONE.
+- **Transfer test (mult=8, 40k corpus, before/after on demo mobility):** transformer 0.364→0.344
+  (−0.02, NOT better); sc_mob FROZEN at 1.820 throughout. So fixing the data was necessary but NOT
+  sufficient — **2nd blocker = the mean-pooling readout.** Mobility is per-frame temporal variation,
+  but the contrastive proj head AND the downstream head both read the MEAN-pooled embedding (avg over
+  1024 patches) which discards temporal variation → sc_mob can't organize it, head can't see it.
+- **Temporal pooling (`meanstd_t` = mean ++ per-freq std-over-time) implemented** in both backbones'
+  `embed()` (`pool_tokens`) + threaded through SpectroMoE/extract_embeddings (2*d_model) + validator.
+- **mult=8 + meanstd_t result (demo mobility):** TF random 0.420→trained 0.436 (+0.016);
+  mamba 0.440→0.384 (−0.056). So data+pooling lift mobility **above the 0.38 floor (~0.42–0.44)**, but
+  PRETRAINING still doesn't add it — `sc_mob` froze because the mobility contrastive head also
+  mean-pools. **Last lever:** give the **mobility SupCon head temporal pooling** so `sc_mob` engages
+  and training organizes mobility. Implementing + testing now.
 
 ---
 

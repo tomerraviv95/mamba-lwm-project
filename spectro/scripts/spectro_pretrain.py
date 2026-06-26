@@ -65,7 +65,7 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
                     batch_size, device, seed, val_frac=0.1, patience=4, grad_clip=1.0,
                     warmup_frac=0.1, weight_decay=0.0, min_lr=1e-5, accum_steps=1,
                     contrastive=False, mod=None, mob=None, w_mlm=W_MLM, w_mod=W_MOD, w_mob=W_MOB,
-                    proj_dim=128, proj_pool='mean', temperature=0.2, element_length=16,
+                    proj_dim=128, proj_pool='mean', mob_pool=None, temperature=0.2, element_length=16,
                     wandb_run=None, tag=''):
     """Pretrain one expert (``arch``). MLM, or MLM+SupCon when ``contrastive``. Returns best state."""
     ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
@@ -92,7 +92,7 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
     proj_mod = proj_mob = None
     if contrastive:
         proj_mod = ProjectionHead(d_model, proj_dim, pool=proj_pool).to(device)
-        proj_mob = ProjectionHead(d_model, proj_dim, pool=proj_pool).to(device)
+        proj_mob = ProjectionHead(d_model, proj_dim, pool=(mob_pool or proj_pool)).to(device)
         params += list(proj_mod.parameters()) + list(proj_mob.parameters())
 
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)

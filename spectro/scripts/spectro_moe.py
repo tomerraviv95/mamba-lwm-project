@@ -104,7 +104,8 @@ class SpectroMoE(nn.Module):
         device = device if torch.cuda.is_available() else "cpu"
         self.to(device).eval()
         n = specs.shape[0]
-        out = torch.empty(n, self.d_model, dtype=torch.float32)
+        emb_dim = self.d_model * (2 if self.pool == "meanstd_t" else 1)  # meanstd_t concats mean++temporal-std
+        out = torch.empty(n, emb_dim, dtype=torch.float32)
         for start in range(0, n, batch_size):
             sl = slice(start, min(start + batch_size, n))
             batch = specs[sl].to(device).float()
