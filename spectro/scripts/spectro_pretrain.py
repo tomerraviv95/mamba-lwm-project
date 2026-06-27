@@ -69,9 +69,13 @@ def pretrain_expert(specs: torch.Tensor, *, arch, d_model, n_layers, mask_percen
                     warmup_frac=0.1, weight_decay=0.0, min_lr=1e-5, accum_steps=1,
                     contrastive=False, mod=None, mob=None, w_mlm=W_MLM, w_mod=W_MOD, w_mob=W_MOB,
                     proj_dim=128, proj_pool='mean', mob_pool=None, temperature=0.2, element_length=16,
-                    wandb_run=None, tag=''):
-    """Pretrain one expert (``arch``). MLM, or MLM+SupCon when ``contrastive``. Returns best state."""
-    ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed)
+                    mask_mode='random', wandb_run=None, tag=''):
+    """Pretrain one expert (``arch``). MLM, or MLM+SupCon when ``contrastive``. Returns best state.
+
+    ``mask_mode``: 'random' (BERT patch masking) or 'time_col' (mask whole time columns -> temporal
+    Doppler pretext)."""
+    ids, toks, pos = build_masked_tensors(specs, mask_percent=mask_percent, seed=seed,
+                                          mask_mode=mask_mode)
     n = ids.shape[0]
     rng = np.random.RandomState(seed)
     perm = rng.permutation(n)

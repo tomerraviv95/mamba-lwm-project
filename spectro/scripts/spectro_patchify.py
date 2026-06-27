@@ -88,14 +88,17 @@ def spectrogram_patchify(specs, patch: int = PATCH, normalize: bool = True) -> n
 
 
 def make_sample_spectro(patches: np.ndarray, n_masks: int, mask: bool = True,
-                        rng: np.random.Generator | None = None):
+                        rng: np.random.Generator | None = None,
+                        masked_pos: np.ndarray | None = None):
     """Prepend CLS and (optionally) apply 80/10/10 BERT masking to one sample's patches.
 
     Args:
         patches: (n_patches, element_length) tokens for a single spectrogram.
-        n_masks: number of patch positions to mask.
+        n_masks: number of patch positions to mask (ignored if ``masked_pos`` is given).
         mask: if False, just prepend CLS and return the token tensor.
         rng: numpy Generator for reproducibility.
+        masked_pos: optional explicit 1-based positions to mask (e.g. time-column masking computed by
+            the caller). When provided it overrides the random ``n_masks`` selection.
 
     Returns:
         If ``mask`` is False: ``np.ndarray`` (n_patches+1, element_length).
@@ -110,7 +113,9 @@ def make_sample_spectro(patches: np.ndarray, n_masks: int, mask: bool = True,
         return input_ids
 
     n_patches = patches.shape[0]
-    if n_masks <= 0 or n_patches == 0:
+    if masked_pos is not None:
+        masked_pos = np.asarray(masked_pos, dtype=np.int64)
+    elif n_masks <= 0 or n_patches == 0:
         masked_pos = np.empty(0, dtype=np.int64)
     else:
         n_masks = min(n_masks, n_patches)
@@ -129,24 +134,50 @@ def make_sample_spectro(patches: np.ndarray, n_masks: int, mask: bool = True,
     return [input_ids, masked_tokens, masked_pos.astype(np.int64)]
 
 
-def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch: int = PATCH):
+def time_column_positions(side: int, frac: float, rng: np.random.Generator) -> np.ndarray:
+    """1-based patch positions covering a random subset of TIME columns of a side x side patch grid.
+
+    Patches are row-major (freq_block, time_block): patch_idx = f*side + t (0-based), so a time
+    column t = {f*side + t : f in 0..side-1}. Masking whole time columns (instead of random patches)
+    forces MLM to reconstruct a missing time slice from its temporal neighbours -> the model must
+    model how the channel evolves in time (Doppler), which random-patch masking does not require.
+    +1 converts to 1-based positions (CLS is at 0)."""
+    n_cols = max(1, int(round(frac * side)))
+    cols = rng.choice(side, size=min(n_cols, side), replace=False)
+    f = np.arange(side)
+    pos = (f[:, None] * side + cols[None, :]).reshape(-1)        # (side * n_cols,)
+    return np.sort(pos.astype(np.int64)) + 1
+
+
+def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch: int = PATCH,
+                         mask_mode: str = "random"):
     """Build stacked (input_ids, masked_tokens, masked_pos) tensors for MLM pretraining.
 
-    All 128x128 spectrograms share n_patches=1024 and the same n_masks, so the per-sample
-    outputs stack cleanly into TensorDataset-ready tensors.
+    All 128x128 spectrograms share the same n_patches and a constant n_masks (random mode) or a
+    constant masked-column count (time_col mode), so the per-sample outputs stack cleanly into
+    TensorDataset-ready tensors.
+
+    Args:
+        mask_mode: 'random' (BERT 4x4-patch masking, default) or 'time_col' (mask whole time columns
+            of the patch grid -> temporal/Doppler pretext, see ``time_column_positions``).
 
     Returns:
-        ``(input_ids, masked_tokens, masked_pos)`` torch tensors of shapes
-        (N, 1025, 16), (N, n_masks, 16), (N, n_masks).
+        ``(input_ids, masked_tokens, masked_pos)`` torch tensors; for patch 4: (N,1025,16),
+        (N,n_masks,16), (N,n_masks).
     """
     patches = spectrogram_patchify(specs, patch=patch, normalize=True)
     n_patches = patches.shape[1]
     n_masks = max(1, int(mask_percent * n_patches))
     rng = np.random.default_rng(seed)
+    side = int(round(n_patches ** 0.5))
+    if mask_mode == "time_col" and side * side != n_patches:
+        raise ValueError(f"time_col masking needs a square patch grid; got n_patches={n_patches}")
 
     ids, toks, pos = [], [], []
     for p in patches:
-        input_ids, masked_tokens, masked_pos = make_sample_spectro(p, n_masks, mask=True, rng=rng)
+        mp = time_column_positions(side, mask_percent, rng) if mask_mode == "time_col" else None
+        input_ids, masked_tokens, masked_pos = make_sample_spectro(p, n_masks, mask=True, rng=rng,
+                                                                   masked_pos=mp)
         ids.append(input_ids)
         toks.append(masked_tokens)
         pos.append(masked_pos)

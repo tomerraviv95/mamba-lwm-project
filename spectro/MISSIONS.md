@@ -157,6 +157,66 @@ Findings: _(to fill)_
 
 ---
 
+## M5 — Push mobility on the DOWNSTREAM task (re-open of M1)  ·  STATUS: IN PROGRESS
+**Goal:** get transformer/mamba to beat random-init on mobility on a held-out demo TEST split (gains
+can be < published 0.69). Continues M1, but with the published side now reverse-engineered.
+
+**Reframe (verified against `spectro/hf_cache/`):** the three "obvious" fixes are dead ends —
+(1) demo `data` is `(1,128,128)` *magnitude* float16, so the published model consumes magnitude too
+(NOT complex/phase); (2) both sides are z-scored `20·log10` dB (our generator already matches); (3)
+their downstream head is `outputs[:,1:,:].mean(dim=1)` and the precomputed `moe_embedding` (a single
+mean-pooled 128-d vector) **already scores 0.69 on our 3-class mobility probe** — so mean-pool is NOT
+fatal and `meanstd_t` was a symptom fix. Conclusion: mobility is recoverable from a mean-pooled
+magnitude embedding IF pretraining bakes it in. Ours doesn't (random-init ≈ pretrained on mobility);
+prime suspect = **pretraining-data domain mismatch** (synth-trained mobility features → demo cross-
+transfer was 0.331 ≈ chance). Their pretrain masks 0.6 (we used 0.7); their contrastive proj also
+mean-pools (`x.mean(dim=1)`).
+
+**Decisive diagnostic (running):** in-domain pretrain — `validate_contrastive_fixed.py
+--pretrain-on demo` pretrains experts on demo `train_idx`, fine-tunes the head on that split, tests on
+the **disjoint** `test_idx` (backbone never saw it → leakage-free), reports random-init vs pretrained.
+Run with `--pool mean` (apples-to-apples with the published proof) for both arches.
+  - trained >> random (mean pool)  → objective+representation OK; whole gap is data-domain → fix the
+    generator / mix demo-domain data into pretraining.
+  - trained ≈ random              → the pretext is too weak for mobility → time-column masking +
+    weak-supervised Doppler/speed aux head.
+Run logs: `cluster/logs/m1_indomain_{arch}_{pool}.log`
+Findings:
+- **[transformer, in-domain demo, MEAN pool] random-init 0.359 → pretrained 0.406 (+0.047).** KEY:
+  this DISPROVES "pure data-domain" — even in-domain our recipe only reaches 0.41 vs published 0.69,
+  so the **objective is also too weak**, not just the corpus. `sc_mob` stayed FROZEN at ~1.84 the whole
+  run (no gradient) while `mlm` (0.54→0.33) and `sc_mod` (1.6→0.85) descended → the +0.047 came from
+  **MLM alone**; the mobility contrastive contributes nothing because it mean-pools (temporal Doppler
+  signal washed out before SupCon). Two fixes to test: (a) temporal-aware pooling for `sc_mob` so it can
+  engage, (b) time-column masking so MLM is forced to model temporal dynamics.
+- **[transformer, in-domain demo, meanstd_t pool + mob-pool meanstd_t] random 0.416 → pretrained 0.444
+  (+0.029).** (1) the `meanstd_t` readout is a real win — lifts BOTH random (0.359→0.416) and pretrained
+  (0.406→0.444); keep it. (2) `sc_mob` STILL froze at ~1.81 even with temporal pooling on the mobility
+  head → the mobility contrastive is a genuine dead end (mobility too weakly separable for SupCon to
+  bootstrap). All gains come from MLM, so the remaining lever is making MLM mobility-aware →
+  **time-column masking** (implemented `mask_mode='time_col'` in spectro_patchify/build_masked_tensors +
+  pretrain_expert + validate `--mask-mode`; unit-tested: 19/32 cols × 32 freq = 608 masked positions).
+
+| in-domain recipe (transformer) | random-init | pretrained |
+|---|---|---|
+| mean pool, random mask | 0.359 | 0.406 |
+| meanstd_t pool, random mask | 0.416 | 0.444 |
+| meanstd_t pool, **time_col** mask | 0.416 | 0.433 |
+| **published moe_embedding (mean-pool)** | — | **0.688** |
+
+**CONCLUSION (elimination):** published `moe_embedding` confirmed **0.688** under our exact held-out
+harness (1575 test). All our in-domain recipes cap at ~0.44. Ruled OUT as the cause: representation
+(both magnitude), dB (both), readout (meanstd_t helps a bit; pub's 0.69 is plain mean-pool), mobility
+contrastive (frozen/dead), time-column masking (no help — model interpolates a missing column without
+encoding Doppler rate). Remaining suspect by elimination = **pretraining strength**: their corpus is
+large + diverse (many cities × FFT × balanced mobility) + in-domain + ~100 epochs; their pretraining
+injects +0.33 mobility into a MEAN embedding (0.36→0.69) vs our +0.05 (0.36→0.41) — ~7× gap. Our
+in-domain test was only 10.5k demo × 15–20 ep. `time_col` masking kept (option, documented no-help).
+NEXT FORK: (a) test scale/epochs in-domain, or (b) practical fix = pretrain synthetic+demo-mix at scale
+w/ meanstd_t and re-run the sweep (transformer/mamba vs random on held-out demo).
+
+---
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.

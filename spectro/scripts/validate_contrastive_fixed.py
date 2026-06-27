@@ -94,6 +94,9 @@ def main():
     ap.add_argument('--epochs', type=int, default=10)
     ap.add_argument('--batch-size', type=int, default=None)
     ap.add_argument('--mask-percent', type=float, default=0.6)
+    ap.add_argument('--mask-mode', choices=['random', 'time_col'], default='random',
+                    help="'time_col' masks whole time columns of the patch grid -> forces MLM to model "
+                         "temporal/Doppler dynamics (vs random 4x4-patch masking).")
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--warmup-frac', type=float, default=0.25)
     ap.add_argument('--weight-decay', type=float, default=0.05)
@@ -158,7 +161,7 @@ def main():
             warmup_frac=args.warmup_frac, weight_decay=args.weight_decay, patience=10**9,
             contrastive=True, mod=a, mob=b, w_mlm=args.w_mlm, w_mod=args.w_a, w_mob=args.w_b,
             element_length=element_length, proj_pool=args.proj_pool, mob_pool=args.mob_pool,
-            temperature=args.temperature, tag=proto)
+            temperature=args.temperature, mask_mode=args.mask_mode, tag=proto)
         moe1.experts[proto].load_state_dict(state)
         del state; torch.cuda.empty_cache()
 
