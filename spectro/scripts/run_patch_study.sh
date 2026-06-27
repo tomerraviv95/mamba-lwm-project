@@ -29,16 +29,25 @@ SEED="${SEED:-42}"
 ARMS="${ARMS:-transformer transformer_synth mamba random_init raw}"
 export CUDA_VISIBLE_DEVICES=0             # GPU0 only (GPU1 is too slow)
 PY="${PY:-.venv/bin/python}"
-EVAL_EVERY=$(( STEPS / 6 > 0 ? STEPS / 6 : 1 ))
+EVAL_EVERY="${EVAL_EVERY:-2000}"
+EVAL_TASK="${EVAL_TASK:-modulation}"
+# Pretrain recipe — defaults MATCH cluster/config.env so local (this script) and cluster
+# (01_pretrain_spectro.sbatch) pretrains are apples-to-apples (paper Table I + router epochs).
+MASK_PERCENT="${MASK_PERCENT:-0.7}"; W_MLM="${W_MLM:-1.0}"; W_CONT="${W_CONT:-0.3}"
+TEMP="${TEMP:-0.2}"; LR="${LR:-5e-4}"; MIN_LR="${MIN_LR:-1e-8}"; WARMUP="${WARMUP:-0.1}"
+WD="${WD:-0.05}"; N_LAYERS="${N_LAYERS:-12}"; ROUTER_EPOCHS="${ROUTER_EPOCHS:-15}"
 
 echo "M3 patch study: PATCH=$PATCH MODE=$MODE ARCHES='$ARCHES' STEPS=$STEPS POOL=$POOL SEED=$SEED (GPU0)"
 
 if [[ "$MODE" == pretrain || "$MODE" == all ]]; then
     for arch in $ARCHES; do
-        echo "===== pretrain $arch  patch=$PATCH ====="
+        echo "===== pretrain $arch  patch=$PATCH (corpus=$PRETRAIN_DIR) ====="
         "$PY" spectro/scripts/spectro_pretrain_real.py --arch "$arch" --patch "$PATCH" \
             --pretrain-dir "$PRETRAIN_DIR" --steps "$STEPS" --eval-every "$EVAL_EVERY" \
-            --eval-task modulation --seed "$SEED"
+            --eval-task "$EVAL_TASK" --n-layers "$N_LAYERS" --router-epochs "$ROUTER_EPOCHS" \
+            --mask-percent "$MASK_PERCENT" --w-mlm "$W_MLM" --w-cont "$W_CONT" --temperature "$TEMP" \
+            --lr "$LR" --min-lr "$MIN_LR" --warmup-frac "$WARMUP" --weight-decay "$WD" \
+            --seed "$SEED"
     done
 fi
 
