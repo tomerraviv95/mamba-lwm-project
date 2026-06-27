@@ -147,12 +147,19 @@ temporal pooling valid at every patch. Nothing in the pipeline hard-codes 1024/1
 
 ---
 
-## M4 — 2 more seeds per patch size (after M3 validates)  ·  STATUS: TODO
+## M4 — 2 more seeds per patch size (after M3 validates)  ·  STATUS: TODO (seed-1 pretrains running)
 **Goal:** statistical confidence — run 2 additional seeds for each patch size; report mean ± 95% CI.
+**Seed-1 (42) pretrains — apples-to-apples (batch 32, mult8_vary corpus, 12k steps, router-ep 15):**
+- MAMBA p4/p6/p8: DONE locally (GPU0) → `spectro_mamba_p{4,6,8}_weights/` (3 experts + router each; in-
+  training demo-mod probe lifts WiFi 0.70→0.83-0.88, 5G 0.77→0.80-0.82, LTE ~0.88 flat).
+- TRANSFORMER p4/p6/p8: on the cluster (`sbatch ARCH=transformer,PATCH=N`, same recipe via config.env);
+  corpus pushed to HF `tomerraviv95/lwm-spectro-deepmimo-mult8vary` (private) + pulled cluster-side.
+- Downstream finetune+test (user-run): `PATCH=N MODE=downstream ARCHES=... bash run_patch_study.sh`
+  (`--pool meanstd_t`); transformer_synth arm needs the cluster checkpoints pulled local first.
 Steps:
 - [ ] For each validated patch size, re-run pretrain+downstream with 2 more seeds (seed in name/config).
 - [ ] Aggregate mean ± CI per (patch, arch, task); update the plot with error bars.
-Run logs: `cluster/logs/m4_p{patch}_seed{N}_*.log`
+Run logs: `cluster/logs/m3_mamba_pretrain_p468.log`, `cluster/logs/m4_p{patch}_seed{N}_*.log`
 Findings: _(to fill)_
 
 ---
