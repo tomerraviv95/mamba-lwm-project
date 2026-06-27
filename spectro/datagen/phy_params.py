@@ -24,6 +24,9 @@ MOBILITIES = ["static", "pedestrian", "vehicular"]
 
 # mobility -> UE speed in m/s (Doppler = speed * carrier_freq / c)
 MOBILITY_SPEED_MS = {"static": 0.0, "pedestrian": 1.0, "vehicular": 30.0}
+# Per-class speed RANGES (m/s) for --vary-speed: broaden the train mobility distribution so its
+# Doppler signature isn't a single point (helps cover/overlap the test distribution). Sampled U[lo,hi].
+MOBILITY_SPEED_RANGE = {"static": (0.0, 0.0), "pedestrian": (0.5, 5.0), "vehicular": (8.0, 50.0)}
 
 CARRIER_FREQUENCY_HZ = 3.5e9   # used for Doppler from speed
 SPEED_OF_LIGHT = 3e8

@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sionna.phy.channel import (ApplyTimeChannel, cir_to_time_channel,  # noqa: E402
                                  time_lag_discrete_time_channel)
 from deepmimo_channel import CITY_SCENARIOS, deepmimo_tdl_cir, extract_city_pdp  # noqa: E402
-from phy_params import (CARRIER_FREQUENCY_HZ, MOBILITIES, MOBILITY_SPEED_MS, MOD_BITS,  # noqa: E402
-                        MODULATIONS, PROTOCOL_CONFIGS, PROTOCOLS, SNRS_DB, snr_label)
+from phy_params import (CARRIER_FREQUENCY_HZ, MOBILITIES, MOBILITY_SPEED_MS, MOBILITY_SPEED_RANGE,  # noqa: E402
+                        MOD_BITS, MODULATIONS, PROTOCOL_CONFIGS, PROTOCOLS, SNRS_DB, snr_label)
 from sionna_blocks import DEVICE, _BINARY_SOURCE, _ofdm_chain  # noqa: E402
 from spectrogram import iq_batch_to_spectrogram, iq_batch_to_complex_spectrogram  # noqa: E402
 
@@ -66,6 +66,10 @@ def main():
     ap.add_argument('--shard-size', type=int, default=2000)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--smoke', action='store_true')
+    ap.add_argument('--vary-speed', action='store_true',
+                    help='sample each sample speed from a per-class RANGE (MOBILITY_SPEED_RANGE) instead '
+                         'of a fixed value -> broader mobility/Doppler distribution in train (helps the '
+                         'train mobility signature overlap the test distribution).')
     ap.add_argument('--symbol-mult', type=int, default=1,
                     help='multiply OFDM symbols per burst -> longer slow-time window so Doppler/mobility '
                          'shows across STFT frames (burst must exceed Doppler coherence time). Memory '
@@ -112,7 +116,10 @@ def main():
             num_time = x.shape[-1]
             if apply is None:
                 apply = ApplyTimeChannel(num_time, l_tot=l_tot, add_awgn=False).to(DEVICE)
-            speeds = np.array([MOBILITY_SPEED_MS[mobs[i]] for i in bi], dtype=np.float32)
+            if args.vary_speed:
+                speeds = np.array([rng.uniform(*MOBILITY_SPEED_RANGE[mobs[i]]) for i in bi], dtype=np.float32)
+            else:
+                speeds = np.array([MOBILITY_SPEED_MS[mobs[i]] for i in bi], dtype=np.float32)
             a, tau = deepmimo_tdl_cir(delays[bi], powers[bi], phases[bi], aoas[bi], speeds,
                                       num_time + l_tot - 1, sr, fc=CARRIER_FREQUENCY_HZ, device=DEVICE)
             h = cir_to_time_channel(sr, a, tau, l_min=l_min, l_max=l_max, normalize=True)
@@ -141,6 +148,7 @@ def main():
     manifest = {'n_samples': made, 'shards': shard_paths, 'shard_size': args.shard_size,
                 'per_city': args.per_city, 'cities': CITY_SCENARIOS, 'seed': args.seed,
                 'complex': bool(args.complex), 'symbol_mult': args.symbol_mult,
+                'vary_speed': bool(args.vary_speed),
                 'source': 'deepmimo-channel-spectrograms',
                 'note': 'OFDM waveforms through DeepMIMO ray-traced channels (delay/power/AoA) + AWGN -> STFT.'}
     with open(os.path.join(args.out, 'manifest.json'), 'w') as f:
