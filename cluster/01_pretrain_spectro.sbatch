@@ -11,7 +11,7 @@
 #   uv run --no-sync python spectro/scripts/hf_sync.py pull-dataset --repo "$SPECTRO_DM_REPO" --dir "$SPECTRO_DM_DIR"
 #   uv run --no-sync python spectro/scripts/download_spectro_hf.py --skip-weights   # demo + LWM source
 #
-# Run once per backbone (batch auto-set: transformer 8, mamba 32):
+# Run once per backbone (batch = SPECTRO_BATCH=32 for both arches; apples-to-apples):
 #   sbatch --export=ALL,ARCH=transformer cluster/01_pretrain_spectro.sbatch
 #   sbatch --export=ALL,ARCH=mamba       cluster/01_pretrain_spectro.sbatch
 # demo-acc-vs-steps -> spectro/outputs/pretrained_models/spectro_${ARCH}_weights/{LTE,WiFi,5G}_steps.csv
@@ -60,7 +60,7 @@ fi
 
 ARCH="${ARCH:-mamba}"                       # transformer | mamba
 PATCH="${PATCH:-${SPECTRO_PATCH:-4}}"       # 4 | 6 | 8 (baked into the weights dir name)
-BATCH=$([ "$ARCH" = "transformer" ] && echo 8 || echo 32)   # transformer attention is memory-bound
+BATCH="${BATCH:-${SPECTRO_BATCH:-32}}"      # SAME batch for both arches (apples-to-apples)
 
 echo "Spectro $ARCH MoE STEP-BASED real pretrain (paper recipe) patch=$PATCH on $SPECTRO_DM_DIR:"
 echo "  steps=$SPECTRO_STEPS/expert  eval_every=$SPECTRO_EVAL_EVERY ($SPECTRO_EVAL_TASK)  batch=$BATCH"

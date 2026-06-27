@@ -158,7 +158,7 @@ def main():
     ap.add_argument('--wandb-project', default='lwm-spectro')
     ap.add_argument('--run-name', default=None)
     args = ap.parse_args()
-    args.batch_size = args.batch_size or (8 if args.arch == 'transformer' else 32)
+    args.batch_size = args.batch_size or 32   # SAME default for both arches (apples-to-apples)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.manual_seed(args.seed)
