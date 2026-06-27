@@ -157,7 +157,18 @@ Findings: _(to fill)_
 
 ---
 
-## M5 — Push mobility on the DOWNSTREAM task (re-open of M1)  ·  STATUS: IN PROGRESS
+## M5 — Push mobility on the DOWNSTREAM task (re-open of M1)  ·  STATUS: DONE (ceiling accepted)
+**VERDICT (decision: accept ~0.44, lock `meanstd_t`, document the ceiling).** By elimination, our
+mobility ceiling is ~0.44 and the published 0.69 requires a *large + in-domain* pretraining corpus
+(their generator) that we don't have and didn't reproduce. Both controllable factors cap at 0.44:
+large-synthetic-OOD (M1/M2 sweep) ≈ 0.44 and small-demo-in-domain (M5, 10.5k×15-20ep) ≈ 0.44; only
+large+in-domain (their corpus) → 0.688. We DID meet the stated bar — pretraining > random-init on
+mobility, leakage-safe (mean 0.359→0.406, meanstd_t 0.416→0.444). **Locked recipe for our arms:
+`--pool meanstd_t`** (sweep default + cluster `SPECTRO_POOL`); mobility contrastive is dead (sc_mob
+frozen) so leave `--contrast`/SupCon off the mobility head; `time_col` masking retained as a no-help
+option. Gap to 0.69 = pretraining-corpus limitation (documented in spectro/README.md). Did NOT pursue:
+generator reproduction (option D) — heaviest, deferred.
+
 **Goal:** get transformer/mamba to beat random-init on mobility on a held-out demo TEST split (gains
 can be < published 0.69). Continues M1, but with the published side now reverse-engineered.
 

@@ -69,3 +69,25 @@ labelled samples grow"**, not as a like-for-like pretraining comparison.
 Additionally, the HF *pretraining* used complex (real/imag-interleaved) spectrograms
 (`element_length=32`), but the demo data we have is single-channel real (128×128), so the
 Mamba arm uses single-channel patches (`element_length=16`).
+
+## Mobility task: the 0.44-vs-0.69 ceiling (known limitation)
+
+Our pretrained arms reach **~0.44** on the 3-class mobility task while the published
+`moe_embedding` reaches **0.69** (both on the same held-out demo split, plain mean-pool).
+A focused diagnostic (see `MISSIONS.md` M5) ruled out the usual suspects: the demo is
+*magnitude* (the published model consumes magnitude too — not complex/phase), both sides are
+z-scored `20·log10` dB, mean-pool is not fatal (their 0.69 *is* mean-pool), the supervised
+mobility contrastive is degenerate (`sc_mob` never leaves its init — mobility is too weakly
+separable for SupCon to bootstrap), and time-column masking does not help (the model
+interpolates a missing time slice without encoding Doppler rate).
+
+By elimination the gap is **pretraining strength**: the published embedding comes from a
+*large + in-domain* corpus (their generator: many cities × FFT sizes × balanced mobility,
+~100 epochs). The two factors we can control each cap at ~0.44 — large-but-out-of-domain
+(our 150k DeepMIMO synthetic) and in-domain-but-small (the 10.5k demo). Only large **and**
+in-domain reaches 0.69, and that corpus is not public. **What does work and is the locked
+recipe:** the `meanstd_t` readout (mean ++ per-frequency temporal-std; `--pool meanstd_t`,
+the default) plus a Doppler-bearing corpus (`--symbol-mult 8 --vary-speed`); pretraining then
+beats random-init on mobility (mean-pool 0.36→0.41, meanstd_t 0.42→0.44) — small but real and
+leakage-safe. Closing to 0.69 would require reproducing their generator's mobility corpus at
+scale (deferred).
