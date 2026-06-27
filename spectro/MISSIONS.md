@@ -90,7 +90,14 @@ Findings:
 
 ---
 
-## M2 — Add a `random-init` arm to the sweep  ·  STATUS: TODO
+## M2 — Add a `random-init` arm to the sweep  ·  STATUS: DONE
+**RESULT (acc @100%, demo):** ordering raw < random-init < ours < published holds for mod+SNR.
+  modulation: raw .58 | rand-init .85 | TF-ours .91 | mamba .90 | pub .96
+  SNR:        raw .38 | rand-init .62 | TF-ours .85 | mamba .84 | pub 1.00
+  mobility:   raw .38 | rand-init .40 | TF-ours .38 | mamba .45 | pub .69  (mean-pool; M1 fix lands in M3)
+Insight: the untrained MoE arch alone is strong (mod .85 / SNR .62); pretraining's LIFT over random-init
+is +.06 mod but +.22 SNR (clearly helps SNR; mod is mostly architectural). `_random_init_features` in
+spectro_train_heads.py (--arm random_init, oracle routing); added to plot + 02 sbatch ARMS.
 **Goal:** put the pretraining "lift" explicitly on the same axes as raw / pub-baseline / ours.
 Steps:
 - [ ] Add `random_init` arm to `spectro_train_heads.py` (`_MOE_ARMS`-style, untrained MoE, fixed seed).
