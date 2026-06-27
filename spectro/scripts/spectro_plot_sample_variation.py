@@ -22,6 +22,7 @@ ARMS = [
     ('transformer',       'LWM-Spectro baseline (real-corpus Transformer MoE)', '#1f77b4', '-',  'o'),
     ('transformer_synth', 'Transformer MoE (synthetic-pretrained)',            '#2ca02c', '-.', 'D'),
     ('mamba',             'WiMamba MoE (synthetic-pretrained)',                '#d62728', '--', 's'),
+    ('random_init',       'Random-init MoE (no pretraining)',                  '#9467bd', ':',  'v'),
     ('raw',               'Raw patches',                                       '#7f7f7f', ':',  '^'),
 ]
 TASKS = [('task_modulation', 'Modulation'), ('task_snr', 'SNR'), ('task_mobility', 'Mobility')]

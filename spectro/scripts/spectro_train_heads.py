@@ -47,6 +47,15 @@ def _raw_features(data) -> torch.Tensor:
     return torch.tensor(patches.mean(axis=1), dtype=torch.float32)
 
 
+def _random_init_features(data, device, arch='transformer', pool='mean', seed=42) -> torch.Tensor:
+    """Untrained MoE (random weights) embeddings, oracle routing -> isolates the pretraining LIFT
+    (random-init backbone is the no-pretraining-but-same-architecture baseline)."""
+    torch.manual_seed(seed)
+    moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool)
+    return moe.extract_embeddings(data.spectrograms, routing='oracle',
+                                  protocol_idx=data.protocol, device=device)
+
+
 def _moe_features(data, device, routing, arch, weights_subdir) -> torch.Tensor:
     """Load a pretrained MoE (Mamba or Transformer) and extract routed embeddings -> (N, d_model)."""
     wdir = os.path.join(_PRETRAINED, weights_subdir)
@@ -73,7 +82,8 @@ def _moe_features(data, device, routing, arch, weights_subdir) -> torch.Tensor:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw'], required=True)
+    ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw', 'random_init'],
+                    required=True)
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
                     help='routing strategy for the synthetic-pretrained MoE arms.')
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
@@ -88,6 +98,8 @@ def main():
     print(f"Extracting features for arm={args.arm} ...")
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
+    elif args.arm == 'random_init':
+        features = _random_init_features(data, device, arch='transformer', seed=args.seed)
     elif args.arm in _MOE_ARMS:
         arch, weights_subdir = _MOE_ARMS[args.arm]
         features = _moe_features(data, device, args.routing, arch, weights_subdir)

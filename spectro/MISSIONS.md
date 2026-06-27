@@ -19,7 +19,17 @@ Checkpoints: HF `tomerraviv95/wimamba-spectro-ckpts`; W&B offline `real-transfor
 
 ---
 
-## M1 — Fix the mobility task (no downstream gain)  ·  STATUS: DIAGNOSED; PARTIAL FIX (awaiting decision)
+## M1 — Fix the mobility task (no downstream gain)  ·  STATUS: DONE
+**RESULT:** mobility downstream 0.35 (old) → **~0.44 (both arches)**, clears the 0.38 raw floor.
+Fix = three parts, all needed: (1) `--symbol-mult 8` (burst long enough for Doppler), (2) `--vary-speed`
+(per-class speed ranges → train mobility distribution overlaps test; cross-transfer 0.331→0.365),
+(3) `meanstd_t` pooling (per-freq temporal-std readout — mean-pool discarded mobility). vary-speed also
+fixed mamba's degradation (fixed-speed mult8 hurt mamba −0.056 → vary-speed ~0.00). Pretraining itself is
+~neutral on mobility (gain is data+readout); residual gap to published 0.69 = channel-model difference
+(our DeepMIMO-TDL vs demo's gen) — unfixable without their generator. **Recipe for our arms going forward:
+gen with `--symbol-mult 8 --vary-speed`, downstream `--pool meanstd_t`.** (verbose working notes below.)
+
+## M1 (superseded — DIAGNOSED; PARTIAL FIX)
 **CONCLUSION:** root causes fully found; mobility is now **recoverable above the 0.38 floor (~0.42–0.44)**
 via data + readout fixes, but **pretraining itself does not drive the mobility gain** (objective can't
 capture it cheaply). Best config: **mult=8 corpus + `meanstd_t` downstream pooling, plain mean contrastive**

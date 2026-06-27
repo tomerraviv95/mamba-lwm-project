@@ -43,7 +43,7 @@ if [ ! -f "$REPO_ROOT/spectro/hf_cache/demo_data.pt" ]; then
 fi
 
 # Arms to run; override with: sbatch --export=ALL,ARMS="transformer mamba raw" ...
-ARMS="${ARMS:-transformer transformer_synth mamba raw}"
+ARMS="${ARMS:-transformer transformer_synth mamba random_init raw}"
 for arm in $ARMS; do
     echo "===== arm: $arm ====="
     uv run --no-sync python spectro/scripts/spectro_train_heads.py --arm "$arm" --seed "$SEED"
