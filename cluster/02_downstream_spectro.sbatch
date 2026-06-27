@@ -43,12 +43,17 @@ if [ ! -f "$REPO_ROOT/spectro/hf_cache/demo_data.pt" ]; then
 fi
 
 # Arms to run; override with: sbatch --export=ALL,ARMS="transformer mamba raw" ...
+# PATCH/POOL must match the pretrained checkpoints (M1 recipe default pool=meanstd_t).
 ARMS="${ARMS:-transformer transformer_synth mamba random_init raw}"
+PATCH="${PATCH:-${SPECTRO_PATCH:-4}}"
+POOL="${POOL:-${SPECTRO_POOL:-meanstd_t}}"
+echo "Downstream sweep patch=$PATCH pool=$POOL arms='$ARMS'"
 for arm in $ARMS; do
-    echo "===== arm: $arm ====="
-    uv run --no-sync python spectro/scripts/spectro_train_heads.py --arm "$arm" --seed "$SEED"
+    echo "===== arm: $arm  (patch=$PATCH pool=$POOL) ====="
+    uv run --no-sync python spectro/scripts/spectro_train_heads.py --arm "$arm" \
+        --patch "$PATCH" --pool "$POOL" --seed "$SEED"
 done
 
 echo "Plotting accuracy vs #samples ..."
-uv run --no-sync python spectro/scripts/spectro_plot_sample_variation.py
-echo "Done -> spectro/outputs/plots/spectro_performance_vs_samples.png"
+uv run --no-sync python spectro/scripts/spectro_plot_sample_variation.py --patch "$PATCH"
+echo "Done -> spectro/outputs/plots/spectro_performance_vs_samples_p${PATCH}.png"

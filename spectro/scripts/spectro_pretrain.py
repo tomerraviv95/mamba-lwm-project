@@ -52,8 +52,11 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 W_MLM, W_MOD, W_MOB = 1.0, 0.3, 0.3
 
 
-def weights_dir(arch: str) -> str:
-    return os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models', f'spectro_{arch}_weights')
+def weights_dir(arch: str, patch: int = 4) -> str:
+    """Patch-parameterized weights dir, e.g. spectro_transformer_p4_weights. Patch is baked into the
+    name so different patch sizes never collide and a run is retrievable by (arch, patch)."""
+    return os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models',
+                        f'spectro_{arch}_p{patch}_weights')
 
 
 def _wandb_log(run, data: dict):

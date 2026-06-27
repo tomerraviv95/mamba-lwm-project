@@ -108,20 +108,42 @@ Findings: _(to fill)_
 
 ---
 
-## M3 — Patch-size-parameterized pretrain + downstream (patch ∈ {4,6,8})  ·  STATUS: TODO
+## M3 — Patch-size-parameterized pretrain + downstream (patch ∈ {4,6,8})  ·  STATUS: DONE (plumbing+smoke)
 **Goal:** run pretraining/downstream with a chosen patch size; **persist patch size in every
-output name + config** so runs are retrievable later. (patch 4→element16/seq1025, 6→36/441,
-8→64/257; expert `element_length` and `max_len` must follow the patch.)
+output name + config** so runs are retrievable later. (patch 4→elem16/seq1025, 6→elem36/seq442,
+8→elem64/seq257; expert `element_length` and `max_len` follow the patch. All three `side` values
+32/21/16 are perfect squares so `meanstd_t` temporal pooling works for every patch.)
+**Decisions (this session):** scope = plumbing + launchers + smoke (NOT the full multi-hour runs —
+user triggers those for the patch/target they pick). M1 recipe baked in as the default: corpus
+generated `--symbol-mult 8 --vary-speed` (use `spectro/outputs/spectro_deepmimo_mult8_vary`),
+downstream `--pool meanstd_t`.
 Steps:
-- [ ] Thread `--patch` through patchify (`spectrogram_patchify`/`build_masked_tensors`),
-      `build_expert` (element_length, max_len), `spectro_pretrain_real.py`, the sweep, the MoE.
-- [ ] Weights dir → `spectro_{arch}_p{patch}_weights/`; sweep submissions →
-      `submission_spectro_{arm}_p{patch}/`; record `patch` in every saved config/manifest + W&B/run name.
-- [ ] Provide BOTH a local launcher and a cluster sbatch parameterized by `PATCH` (env), runnable
-      for either pretraining or downstream, on whichever target the user picks.
-- [ ] Smoke each of patch 4/6/8 (shapes + one short run).
+- [x] `patch_geometry(patch,channels)` helper in spectro_patchify (element_length/n_patches/max_len/side).
+- [x] Thread `--patch` through `spectro_pretrain_real.py` (build_masked_tensors, build_expert max_len,
+      _embed/demo_probe), `SpectroMoE` (`patch` attr → `_expert_embed` patchify), and the sweep
+      `spectro_train_heads.py` (raw/random_init/moe arms + `--pool` default meanstd_t).
+- [x] Weights dir → `spectro_{arch}_p{patch}_weights/` (`weights_dir(arch,patch)`); sweep submissions →
+      `submission_spectro_{arm}_p{patch}/`; plot → `..._p{patch}.png`; `patch`+element_length+max_len
+      recorded in each `{proto}_expert.pth`; W&B run name `real-{arch}-p{patch}`.
+- [x] Launchers: local `spectro/scripts/run_patch_study.sh` (PATCH/MODE/ARCHES env, GPU0-only) +
+      cluster `01`/`02` sbatch parameterized by `PATCH`/`POOL` (config.env SPECTRO_PATCH/SPECTRO_POOL).
+- [x] Shapes smoke — patch 4/6/8 × {transformer,mamba}: patchify/masked-tensors/expert-forward/MoE-embed
+      all correct (p4 1024/16, p6 441/36, p8 256/64; meanstd_t → 256-d), finite.
+- [x] Short pretrain smoke (patch 6, transformer, 200 steps, mult8_vary corpus) → wrote
+      `spectro_transformer_p6_weights/` with `{patch:6, element_length:36, max_len:442}` in each
+      `{proto}_expert.pth`; router val_acc 0.996; demo probe ran each eval. Downstream smoke (p6,
+      transformer_synth, meanstd_t, 2 epochs) loaded those checkpoints → 256-d features (finite),
+      wrote `submission_spectro_transformer_synth_p6/`; plot wrote `..._p6.png`. (Toy artifacts then
+      deleted — they're 200-step/2-epoch, not real numbers.)
 Run logs: `cluster/logs/m3_p{4,6,8}_*.log`
-Findings: _(to fill)_
+**HOW TO RUN (real):** local — `PATCH=6 bash spectro/scripts/run_patch_study.sh` (GPU0; full
+pretrain+downstream+plot, M1 recipe defaults). Cluster — `sbatch --export=ALL,ARCH=transformer,PATCH=6
+cluster/01_pretrain_spectro.sbatch` (per arch), then `sbatch --export=ALL,PATCH=6
+cluster/02_downstream_spectro.sbatch`. Corpus must be the M1 one (`--symbol-mult 8 --vary-speed`,
+e.g. `spectro/outputs/spectro_deepmimo_mult8_vary`). Pick PATCH ∈ {4,6,8}; everything is stamped p{PATCH}.
+Findings: plumbing validated end-to-end for patch 4/6/8 × {transformer,mamba}. Geometry: p4 1024
+tokens/elem16/max1025, p6 441/36/442, p8 256/64/257; sides 32/21/16 all perfect squares → `meanstd_t`
+temporal pooling valid at every patch. Nothing in the pipeline hard-codes 1024/16/1025 anymore.
 
 ---
 

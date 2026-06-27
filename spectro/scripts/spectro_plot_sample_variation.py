@@ -7,6 +7,7 @@ subplot per task plus a dual x-axis (#samples and training %).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 
@@ -28,18 +29,25 @@ ARMS = [
 TASKS = [('task_modulation', 'Modulation'), ('task_snr', 'SNR'), ('task_mobility', 'Mobility')]
 
 
-def _load(arm):
-    path = os.path.join(_SUBMISSIONS, f'submission_spectro_{arm}', 'aggregated_results.json')
-    if not os.path.exists(path):
-        print(f"[skip] {path} not found")
-        return None
-    with open(path) as f:
-        return json.load(f)
+def _load(arm, patch):
+    """Read an arm's aggregated results; prefer the patch-stamped dir, fall back to the legacy
+    un-suffixed dir (pre-M3 runs)."""
+    for sub in (f'submission_spectro_{arm}_p{patch}', f'submission_spectro_{arm}'):
+        path = os.path.join(_SUBMISSIONS, sub, 'aggregated_results.json')
+        if os.path.exists(path):
+            return json.load(open(path))
+    print(f"[skip] no results for arm={arm} (patch {patch} or legacy)")
+    return None
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
+                    help='read submission_spectro_{arm}_p{patch}; output filename is stamped with it.')
+    args = ap.parse_args()
+
     os.makedirs(_PLOTS, exist_ok=True)
-    loaded = {arm: _load(arm) for arm, *_ in ARMS}
+    loaded = {arm: _load(arm, args.patch) for arm, *_ in ARMS}
     if not any(loaded.values()):
         print("No results found. Run spectro_train_heads.py for at least one arm first.")
         return
@@ -74,9 +82,10 @@ def main():
         sec.set_xlabel('Training data %')
 
     axes[0].legend(loc='lower right', fontsize=9)
-    fig.suptitle('Spectrogram downstream transfer: accuracy vs. #training samples', y=1.02)
+    fig.suptitle(f'Spectrogram downstream transfer (patch {args.patch}): accuracy vs. #training samples',
+                 y=1.02)
     fig.tight_layout()
-    out = os.path.join(_PLOTS, 'spectro_performance_vs_samples.png')
+    out = os.path.join(_PLOTS, f'spectro_performance_vs_samples_p{args.patch}.png')
     plt.savefig(out, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"saved -> {out}")

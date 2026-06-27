@@ -26,7 +26,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spectro_data import PROTOCOLS, load_spectro_data  # noqa: E402
 from spectro_moe import SpectroMoE  # noqa: E402
-from spectro_patchify import spectrogram_patchify  # noqa: E402
+from spectro_patchify import spectrogram_patchify, patch_geometry  # noqa: E402
 from spectro_sweep import run_sweep  # noqa: E402
 from spectro_transformer_model import get_baseline_features  # noqa: E402
 
@@ -34,42 +34,53 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 _PRETRAINED = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'pretrained_models')
 _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
 
-# arm -> (architecture, weights subdir) for the synthetic-pretrained MoE arms
-_MOE_ARMS = {
-    'mamba': ('mamba', 'spectro_mamba_weights'),
-    'transformer_synth': ('transformer', 'spectro_transformer_weights'),
-}
+# arm -> architecture for the synthetic-pretrained MoE arms (weights subdir is patch-parameterized
+# at call time: spectro_{arch}_p{patch}_weights).
+_MOE_ARMS = {'mamba': 'mamba', 'transformer_synth': 'transformer'}
 
 
-def _raw_features(data) -> torch.Tensor:
-    """Mean-pooled raw 4x4 patches -> (N, 16) lower-bound features."""
-    patches = spectrogram_patchify(data.spectrograms, normalize=True)  # (N,1024,16)
+def _raw_features(data, patch=4) -> torch.Tensor:
+    """Mean-pooled raw patches -> (N, patch*patch) lower-bound features."""
+    patches = spectrogram_patchify(data.spectrograms, patch=patch, normalize=True)  # (N,n_patches,E)
     return torch.tensor(patches.mean(axis=1), dtype=torch.float32)
 
 
-def _random_init_features(data, device, arch='transformer', pool='mean', seed=42) -> torch.Tensor:
+def _random_init_features(data, device, arch='transformer', pool='mean', seed=42, patch=4) -> torch.Tensor:
     """Untrained MoE (random weights) embeddings, oracle routing -> isolates the pretraining LIFT
     (random-init backbone is the no-pretraining-but-same-architecture baseline)."""
     torch.manual_seed(seed)
-    moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool)
+    geom = patch_geometry(patch)
+    moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool, patch=patch,
+                     element_length=geom['element_length'], max_len=geom['max_len'])
     return moe.extract_embeddings(data.spectrograms, routing='oracle',
                                   protocol_idx=data.protocol, device=device)
 
 
-def _moe_features(data, device, routing, arch, weights_subdir) -> torch.Tensor:
-    """Load a pretrained MoE (Mamba or Transformer) and extract routed embeddings -> (N, d_model)."""
-    wdir = os.path.join(_PRETRAINED, weights_subdir)
+def _moe_features(data, device, routing, arch, patch, pool='mean') -> torch.Tensor:
+    """Load a pretrained MoE (Mamba or Transformer) at the given patch size and extract routed
+    embeddings -> (N, d_model). Geometry (element_length, max_len, patch) is read from the checkpoint."""
+    from spectro_pretrain import weights_dir
+    wdir = weights_dir(arch, patch)
     if not os.path.exists(os.path.join(wdir, 'router.pth')):
-        raise FileNotFoundError(
-            f"No checkpoints in {wdir}. Run: python spectro/scripts/spectro_pretrain.py "
-            f"--data synthetic --arch {arch}")
+        # legacy fallback: pre-M3 patch-4 checkpoints live in the un-suffixed dir (spectro_{arch}_weights)
+        legacy = os.path.join(_PRETRAINED, f'spectro_{arch}_weights')
+        if patch == 4 and os.path.exists(os.path.join(legacy, 'router.pth')):
+            wdir = legacy
+        else:
+            raise FileNotFoundError(
+                f"No checkpoints in {wdir}. Run: python spectro/scripts/spectro_pretrain_real.py "
+                f"--arch {arch} --patch {patch}")
     router_ckpt = torch.load(os.path.join(wdir, 'router.pth'), map_location='cpu', weights_only=False)
     sample_expert = torch.load(os.path.join(wdir, f'{PROTOCOLS[0]}_expert.pth'),
                                map_location='cpu', weights_only=False)
     d_model = sample_expert.get('d_model', 128)
     n_layers = sample_expert.get('n_layers', 12)
+    geom = patch_geometry(sample_expert.get('patch', patch))
+    element_length = sample_expert.get('element_length', geom['element_length'])
+    max_len = sample_expert.get('max_len', geom['max_len'])
 
-    moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers)
+    moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool=pool, patch=patch,
+                     element_length=element_length, max_len=max_len)
     for proto in PROTOCOLS:
         ckpt = torch.load(os.path.join(wdir, f'{proto}_expert.pth'),
                           map_location='cpu', weights_only=False)
@@ -89,25 +100,30 @@ def main():
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
                     help='Transformer-baseline precomputed embedding to use.')
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
+                    help='patch side; must match the pretrained checkpoints. Stamped into the submission dir.')
+    ap.add_argument('--pool', choices=['mean', 'cls', 'meanstd_t'], default='meanstd_t',
+                    help="MoE-arm embedding pooling. M1 recipe default 'meanstd_t' (mean ++ per-freq temporal std).")
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     data = load_spectro_data(seed=args.seed)
 
-    print(f"Extracting features for arm={args.arm} ...")
+    print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} ...")
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
     elif args.arm == 'random_init':
-        features = _random_init_features(data, device, arch='transformer', seed=args.seed)
+        features = _random_init_features(data, device, arch='transformer', seed=args.seed,
+                                         patch=args.patch, pool=args.pool)
     elif args.arm in _MOE_ARMS:
-        arch, weights_subdir = _MOE_ARMS[args.arm]
-        features = _moe_features(data, device, args.routing, arch, weights_subdir)
+        arch = _MOE_ARMS[args.arm]
+        features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool)
     else:
-        features = _raw_features(data)
+        features = _raw_features(data, patch=args.patch)
     print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")
 
-    out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}')
+    out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}')
     run_sweep(args.arm, features, data, out_dir, seed=args.seed, device=device,
               epochs_override=args.epochs)
     print(f"\nDone. Results -> {out_dir}/aggregated_results.json")

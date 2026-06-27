@@ -63,12 +63,13 @@ class SpectroMoE(nn.Module):
     """Per-protocol experts (``arch``) + a router; produces routed spectrogram embeddings."""
 
     def __init__(self, protocols: List[str], d_model: int = 128, pool: str = "mean",
-                 arch: str = "mamba", **expert_kwargs):
+                 arch: str = "mamba", patch: int = 4, **expert_kwargs):
         super().__init__()
         self.protocols = list(protocols)
         self.d_model = d_model
         self.pool = pool
         self.arch = arch
+        self.patch = patch                      # patchify granularity (must match the experts' element_length)
         self.experts = nn.ModuleDict({
             p: build_expert(arch, d_model=d_model, **expert_kwargs) for p in self.protocols
         })
@@ -82,7 +83,7 @@ class SpectroMoE(nn.Module):
     @torch.no_grad()
     def _expert_embed(self, protocol: str, specs: torch.Tensor) -> torch.Tensor:
         """Patchify + run a single expert on a (b,128,128) spectrogram batch -> (b,d_model)."""
-        patches = spectrogram_patchify(specs, normalize=True)        # (b,1024,E) E=16 mag / 32 complex
+        patches = spectrogram_patchify(specs, patch=self.patch, normalize=True)  # (b,n_patches,E)
         # prepend CLS token (0.2*ones, sized to the element_length) to match pretraining tokenization
         cls = np.full((patches.shape[0], 1, patches.shape[2]), 0.2, dtype=np.float32)
         input_ids = torch.tensor(np.concatenate([cls, patches], axis=1), dtype=torch.float32,

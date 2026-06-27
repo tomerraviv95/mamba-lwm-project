@@ -16,6 +16,18 @@ CLS_TOKEN = np.full(ELEMENT_LENGTH, 0.2, dtype=np.float32)
 MASK_TOKEN = np.full(ELEMENT_LENGTH, 0.1, dtype=np.float32)
 
 
+def patch_geometry(patch: int = PATCH, channels: int = 1, img: int = 128) -> dict:
+    """Token geometry for a patch size: element_length, n_patches, max_len (+CLS), grid side.
+
+    img=128, patch 4 -> 32x32=1024 patches, element 16, max_len 1025; patch 6 -> 21x21=441/36/442;
+    patch 8 -> 16x16=256/64/257. (channels=2 for complex doubles element_length.)
+    """
+    side = img // patch
+    n_patches = side * side
+    return {"element_length": patch * patch * channels, "n_patches": n_patches,
+            "max_len": n_patches + 1, "side": side}
+
+
 def _as_2d(spec: np.ndarray) -> np.ndarray:
     """Squeeze (1,H,W)/(1,1,H,W) leading singleton dims down to (H,W)."""
     spec = np.asarray(spec, dtype=np.float32)

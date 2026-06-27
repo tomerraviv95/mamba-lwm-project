@@ -59,13 +59,15 @@ if [ ! -f "$REPO_ROOT/spectro/hf_cache/demo_data.pt" ] || \
 fi
 
 ARCH="${ARCH:-mamba}"                       # transformer | mamba
+PATCH="${PATCH:-${SPECTRO_PATCH:-4}}"       # 4 | 6 | 8 (baked into the weights dir name)
 BATCH=$([ "$ARCH" = "transformer" ] && echo 8 || echo 32)   # transformer attention is memory-bound
 
-echo "Spectro $ARCH MoE STEP-BASED real pretrain (paper recipe) on $SPECTRO_DM_DIR:"
+echo "Spectro $ARCH MoE STEP-BASED real pretrain (paper recipe) patch=$PATCH on $SPECTRO_DM_DIR:"
 echo "  steps=$SPECTRO_STEPS/expert  eval_every=$SPECTRO_EVAL_EVERY ($SPECTRO_EVAL_TASK)  batch=$BATCH"
 echo "  w_mlm=$SPECTRO_W_MLM w_cont=$SPECTRO_W_MOD tau=$SPECTRO_TEMP mask=$MASK_PERCENT lr=$SPECTRO_LR wd=$SPECTRO_WD"
 uv run --no-sync python spectro/scripts/spectro_pretrain_real.py \
     --arch "$ARCH" \
+    --patch "$PATCH" \
     --pretrain-dir "$SPECTRO_DM_DIR" \
     --steps "$SPECTRO_STEPS" --eval-every "$SPECTRO_EVAL_EVERY" --eval-task "$SPECTRO_EVAL_TASK" \
     --router-epochs "$ROUTER_EPOCHS" \
@@ -76,9 +78,9 @@ uv run --no-sync python spectro/scripts/spectro_pretrain_real.py \
     --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" \
     --warmup-frac "$SPECTRO_WARMUP" --weight-decay "$SPECTRO_WD" \
     --seed "$SEED" \
-    --wandb --wandb-project "$WANDB_PROJECT" --run-name "spectro-${ARCH}"
+    --wandb --wandb-project "$WANDB_PROJECT" --run-name "spectro-${ARCH}-p${PATCH}"
 
-echo "Done. Weights + {LTE,WiFi,5G}_steps.csv (demo-acc-vs-steps) in spectro/outputs/pretrained_models/spectro_${ARCH}_weights."
+echo "Done. Weights + {LTE,WiFi,5G}_steps.csv (demo-acc-vs-steps) in spectro/outputs/pretrained_models/spectro_${ARCH}_p${PATCH}_weights."
 
 # --- Save to Hugging Face (best effort here; the canonical step is on the LOGIN node) ----------
 echo "Pushing checkpoints to HF ($HF_MODEL_REPO) ..."

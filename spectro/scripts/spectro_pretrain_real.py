@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from spectro_backbones import build_expert  # noqa: E402
 from spectro_data import PROTOCOLS, load_spectro_data, load_synthetic_data  # noqa: E402
 from spectro_moe import RouterNet, _normalize_per_sample  # noqa: E402
-from spectro_patchify import spectrogram_patchify, build_masked_tensors  # noqa: E402
+from spectro_patchify import spectrogram_patchify, build_masked_tensors, patch_geometry  # noqa: E402
 from contrastive import ProjectionHead, supervised_contrastive_loss  # noqa: E402
 from spectro_pretrain import weights_dir, train_router  # noqa: E402
 
@@ -41,10 +41,10 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 
 
 @torch.no_grad()
-def _embed(expert, specs, pool, device, element_length, batch=16):
+def _embed(expert, specs, pool, device, patch, batch=16):
     """Mean/CLS-pooled embeddings for a stack of spectrograms via one expert."""
     expert.eval()
-    P = spectrogram_patchify(specs, normalize=True)                      # (N,1024,E)
+    P = spectrogram_patchify(specs, patch=patch, normalize=True)         # (N,n_patches,E)
     cls = np.full((P.shape[0], 1, P.shape[2]), 0.2, dtype=np.float32)
     ids = torch.tensor(np.concatenate([cls, P], axis=1), dtype=torch.float32)
     out = []
@@ -54,13 +54,13 @@ def _embed(expert, specs, pool, device, element_length, batch=16):
     return torch.cat(out).numpy()
 
 
-def demo_probe(expert, demo, p_idx, task, pool, device, element_length, cap=1500, seed=0):
+def demo_probe(expert, demo, p_idx, task, pool, device, patch, cap=1500, seed=0):
     """Frozen-embedding logistic-regression accuracy on this protocol's demo slice (one task)."""
     sel = np.where(demo.protocol == p_idx)[0]
     rng = np.random.RandomState(seed)
     if len(sel) > cap:
         sel = np.sort(rng.choice(sel, cap, replace=False))
-    feats = _embed(expert, demo.spectrograms[torch.as_tensor(sel)], pool, device, element_length)
+    feats = _embed(expert, demo.spectrograms[torch.as_tensor(sel)], pool, device, patch)
     y = demo.labels[task][sel].astype(int)
     n = len(sel); ntr = int(0.8 * n)
     perm = rng.permutation(n)
@@ -73,7 +73,8 @@ def demo_probe(expert, demo, p_idx, task, pool, device, element_length, cap=1500
 
 def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, device, args, wandb_run):
     """Step-based MLM+SupCon pretraining of one expert with periodic demo probing. Returns state, history."""
-    ids, toks, pos = build_masked_tensors(specs, mask_percent=args.mask_percent, seed=args.seed)
+    ids, toks, pos = build_masked_tensors(specs, mask_percent=args.mask_percent, seed=args.seed,
+                                          patch=args.patch)
     mod_t = torch.as_tensor(np.asarray(mod), dtype=torch.long)
     mob_t = torch.as_tensor(np.asarray(mob), dtype=torch.long)
     loader = DataLoader(TensorDataset(ids, toks, pos, mod_t, mob_t),
@@ -81,7 +82,7 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     p_idx = PROTOCOLS.index(proto)
 
     model = build_expert(arch, d_model=args.d_model, n_layers=args.n_layers,
-                         element_length=args.element_length).to(device)
+                         element_length=args.element_length, max_len=args.max_len).to(device)
     proj_mod = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device)
     proj_mob = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device)
     params = list(model.parameters()) + list(proj_mod.parameters()) + list(proj_mob.parameters())
@@ -94,7 +95,7 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     mse = nn.MSELoss(reduction='mean')
 
     history, step = [], 0
-    base_acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.element_length, seed=args.seed)
+    base_acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
     print(f"  [{proto}] step 0 (random-init) demo {eval_task} acc = {base_acc:.4f}", flush=True)
     for b_ids, b_toks, b_pos, b_mod, b_mob in itertools.cycle(loader):
         if step >= args.steps:
@@ -116,7 +117,7 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         step += 1
 
         if step % args.eval_every == 0 or step == args.steps:
-            acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.element_length, seed=args.seed)
+            acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
             row = {'step': step, 'mlm': mlm.item(), 'sc_mod': sc_mod.item(), 'sc_mob': sc_mob.item(),
                    'demo_acc': acc, 'lr': opt.param_groups[0]['lr']}
             history.append(row)
@@ -136,6 +137,8 @@ def main():
     ap.add_argument('--eval-every', type=int, default=2000, help='demo-probe every N steps')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
     ap.add_argument('--batch-size', type=int, default=None)
+    ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
+                    help='patch side: 4->1025 tokens/elem16, 6->442/36, 8->257/64 (baked into the weights dir name)')
     ap.add_argument('--d-model', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--router-epochs', type=int, default=8)
@@ -162,19 +165,23 @@ def main():
     pre = load_synthetic_data(args.pretrain_dir, seed=args.seed)
     demo = load_spectro_data(seed=args.seed)
     sp = pre.spectrograms
-    args.element_length = 16 * (sp.shape[1] if sp.ndim == 4 else 1)
-    out_dir = weights_dir(args.arch); os.makedirs(out_dir, exist_ok=True)
+    channels = sp.shape[1] if sp.ndim == 4 else 1
+    geom = patch_geometry(args.patch, channels=channels)
+    args.element_length, args.max_len = geom['element_length'], geom['max_len']
+    out_dir = weights_dir(args.arch, args.patch); os.makedirs(out_dir, exist_ok=True)
 
     wandb_run = None
     if args.wandb:
         try:
             import wandb
-            wandb_run = wandb.init(project=args.wandb_project, name=args.run_name or f"real-{args.arch}",
+            wandb_run = wandb.init(project=args.wandb_project,
+                                   name=args.run_name or f"real-{args.arch}-p{args.patch}",
                                    config=vars(args))
         except Exception as e:
             print(f"WARNING: wandb init failed ({e}); continuing without it.")
 
-    print(f"REAL pretrain {args.arch}: steps={args.steps}/expert eval_every={args.eval_every} "
+    print(f"REAL pretrain {args.arch} patch={args.patch} (elem={args.element_length}, max_len={args.max_len}): "
+          f"steps={args.steps}/expert eval_every={args.eval_every} "
           f"task={args.eval_task} batch={args.batch_size} corpus={pre.spectrograms.shape[0]} "
           f"(w_mlm={args.w_mlm}, w_cont={args.w_cont}, tau={args.temperature}, mask={args.mask_percent})")
     for proto in PROTOCOLS:
@@ -187,7 +194,9 @@ def main():
                                                      demo=demo, eval_task=args.eval_task, device=device,
                                                      args=args, wandb_run=wandb_run)
         torch.save({'state_dict': state, 'arch': args.arch, 'd_model': args.d_model,
-                    'n_layers': args.n_layers}, os.path.join(out_dir, f"{proto}_expert.pth"))
+                    'n_layers': args.n_layers, 'patch': args.patch,
+                    'element_length': args.element_length, 'max_len': args.max_len},
+                   os.path.join(out_dir, f"{proto}_expert.pth"))
         with open(os.path.join(out_dir, f"{proto}_steps.csv"), 'w', newline='') as f:
             w = csv.DictWriter(f, fieldnames=list(history[0].keys())); w.writeheader(); w.writerows(history)
         final = history[-1]['demo_acc'] if history else float('nan')
