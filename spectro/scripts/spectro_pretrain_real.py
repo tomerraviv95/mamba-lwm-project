@@ -95,22 +95,27 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     mse = nn.MSELoss(reduction='mean')
 
     history, step = [], 0
+    accum = max(1, args.accum_steps)            # >1: micro-batch grad accumulation (effective batch = batch*accum)
     base_acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
     print(f"  [{proto}] step 0 (random-init) demo {eval_task} acc = {base_acc:.4f}", flush=True)
-    for b_ids, b_toks, b_pos, b_mod, b_mob in itertools.cycle(loader):
-        if step >= args.steps:
-            break
+    loader_iter = itertools.cycle(loader)
+    while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
         model.train(); proj_mod.train(); proj_mob.train()
-        b_ids, b_toks, b_pos = b_ids.to(device), b_toks.to(device), b_pos.to(device)
-        b_mod, b_mob = b_mod.to(device), b_mob.to(device)
-        logits, output = model(b_ids, b_pos)
-        mlm = mse(logits, b_toks)
-        sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod, temperature=args.temperature,
-                                             base_temperature=args.temperature)
-        sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
-                                             base_temperature=args.temperature)
-        loss = args.w_mlm * mlm + args.w_cont * sc_mod + args.w_cont * sc_mob
-        opt.zero_grad(); loss.backward()
+        opt.zero_grad()
+        mlm_v = sc_mod_v = sc_mob_v = 0.0
+        for _ in range(accum):                  # accumulate grads over `accum` micro-batches, then one opt step
+            b_ids, b_toks, b_pos, b_mod, b_mob = next(loader_iter)
+            b_ids, b_toks, b_pos = b_ids.to(device), b_toks.to(device), b_pos.to(device)
+            b_mod, b_mob = b_mod.to(device), b_mob.to(device)
+            logits, output = model(b_ids, b_pos)
+            mlm = mse(logits, b_toks)
+            sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod, temperature=args.temperature,
+                                                 base_temperature=args.temperature)
+            sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
+                                                 base_temperature=args.temperature)
+            loss = (args.w_mlm * mlm + args.w_cont * sc_mod + args.w_cont * sc_mob) / accum
+            loss.backward()
+            mlm_v += mlm.item() / accum; sc_mod_v += sc_mod.item() / accum; sc_mob_v += sc_mob.item() / accum
         if args.grad_clip:
             torch.nn.utils.clip_grad_norm_(params, args.grad_clip)
         opt.step(); sched.step()
@@ -118,11 +123,11 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
 
         if step % args.eval_every == 0 or step == args.steps:
             acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
-            row = {'step': step, 'mlm': mlm.item(), 'sc_mod': sc_mod.item(), 'sc_mob': sc_mob.item(),
+            row = {'step': step, 'mlm': mlm_v, 'sc_mod': sc_mod_v, 'sc_mob': sc_mob_v,
                    'demo_acc': acc, 'lr': opt.param_groups[0]['lr']}
             history.append(row)
-            print(f"  [{proto}] step {step}/{args.steps}  mlm={mlm.item():.4f} sc_mod={sc_mod.item():.4f} "
-                  f"sc_mob={sc_mob.item():.4f}  demo_{eval_task}={acc:.4f}", flush=True)
+            print(f"  [{proto}] step {step}/{args.steps}  mlm={mlm_v:.4f} sc_mod={sc_mod_v:.4f} "
+                  f"sc_mob={sc_mob_v:.4f}  demo_{eval_task}={acc:.4f}", flush=True)
             if wandb_run is not None:
                 wandb_run.log({f'{proto}/{k}': v for k, v in row.items() if k != 'step'} | {f'{proto}/step': step})
     state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -137,6 +142,11 @@ def main():
     ap.add_argument('--eval-every', type=int, default=2000, help='demo-probe every N steps')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
     ap.add_argument('--batch-size', type=int, default=None)
+    ap.add_argument('--accum-steps', type=int, default=1,
+                    help='gradient accumulation: micro-batches per optimizer step. Effective batch = '
+                         'batch-size * accum-steps. Use e.g. --batch-size 8 --accum-steps 4 (=eff 32) so a '
+                         'memory-heavy transformer matches mamba\'s batch 32 without OOM. Optimizer-step '
+                         'count (--steps) is unchanged, so runs stay apples-to-apples.')
     ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
                     help='patch side: 4->1025 tokens/elem16, 6->442/36, 8->257/64 (baked into the weights dir name)')
     ap.add_argument('--d-model', type=int, default=128)

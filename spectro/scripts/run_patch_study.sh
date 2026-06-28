@@ -36,9 +36,11 @@ EVAL_TASK="${EVAL_TASK:-modulation}"
 MASK_PERCENT="${MASK_PERCENT:-0.7}"; W_MLM="${W_MLM:-1.0}"; W_CONT="${W_CONT:-0.3}"
 TEMP="${TEMP:-0.2}"; LR="${LR:-5e-4}"; MIN_LR="${MIN_LR:-1e-8}"; WARMUP="${WARMUP:-0.1}"
 WD="${WD:-0.05}"; N_LAYERS="${N_LAYERS:-12}"; ROUTER_EPOCHS="${ROUTER_EPOCHS:-15}"
-BATCH="${BATCH:-32}"                     # SAME batch for both arches (apples-to-apples)
+BATCH="${BATCH:-32}"                     # micro-batch. Effective batch = BATCH*ACCUM (apples-to-apples=32)
+ACCUM="${ACCUM:-1}"                       # grad accumulation; e.g. BATCH=8 ACCUM=4 for a transformer that OOMs at 32
 
-echo "M3 patch study: PATCH=$PATCH MODE=$MODE ARCHES='$ARCHES' STEPS=$STEPS POOL=$POOL SEED=$SEED (GPU0)"
+echo "M3 patch study: PATCH=$PATCH MODE=$MODE ARCHES='$ARCHES' STEPS=$STEPS POOL=$POOL SEED=$SEED" \
+     "batch=$BATCH x accum=$ACCUM (eff $((BATCH*ACCUM))) (GPU0)"
 
 if [[ "$MODE" == pretrain || "$MODE" == all ]]; then
     for arch in $ARCHES; do
@@ -46,7 +48,7 @@ if [[ "$MODE" == pretrain || "$MODE" == all ]]; then
         "$PY" spectro/scripts/spectro_pretrain_real.py --arch "$arch" --patch "$PATCH" \
             --pretrain-dir "$PRETRAIN_DIR" --steps "$STEPS" --eval-every "$EVAL_EVERY" \
             --eval-task "$EVAL_TASK" --n-layers "$N_LAYERS" --router-epochs "$ROUTER_EPOCHS" \
-            --batch-size "$BATCH" \
+            --batch-size "$BATCH" --accum-steps "$ACCUM" \
             --mask-percent "$MASK_PERCENT" --w-mlm "$W_MLM" --w-cont "$W_CONT" --temperature "$TEMP" \
             --lr "$LR" --min-lr "$MIN_LR" --warmup-frac "$WARMUP" --weight-decay "$WD" \
             --seed "$SEED"
