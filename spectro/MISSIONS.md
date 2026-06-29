@@ -152,8 +152,14 @@ temporal pooling valid at every patch. Nothing in the pipeline hard-codes 1024/1
 **Seed-1 (42) pretrains — apples-to-apples (batch 32, mult8_vary corpus, 12k steps, router-ep 15):**
 - MAMBA p4/p6/p8: DONE locally (GPU0) → `spectro_mamba_p{4,6,8}_weights/` (3 experts + router each; in-
   training demo-mod probe lifts WiFi 0.70→0.83-0.88, 5G 0.77→0.80-0.82, LTE ~0.88 flat).
-- TRANSFORMER p4/p6/p8: on the cluster (`sbatch ARCH=transformer,PATCH=N`, same recipe via config.env);
-  corpus pushed to HF `tomerraviv95/lwm-spectro-deepmimo-mult8vary` (private) + pulled cluster-side.
+- TRANSFORMER p4/p6/p8: DONE locally too (GPU0, RTX 3060 Ti 8GB) via gradient accumulation
+  (`--batch-size 8 --accum-steps 4` = eff 32; peak ~5.7GB at p4). Detached driver
+  `cluster/run_tf_pretrain_detached.sh` (setsid, idempotent) to survive session teardowns. All 9
+  experts + 3 routers saved. demo-mod init→final: p4 LTE .71→.92 / WiFi .71→**.50 (weak — patch-4 bad
+  run, redo candidate)** / 5G .70→.79; p6 .75→.92 / .71→.91 / .71→.80; p8 .79→.93 / .79→.92 / .77→.81.
+  (Also runnable on cluster: `sbatch ARCH=transformer,PATCH=N`, same recipe via config.env; corpus on HF
+  `tomerraviv95/lwm-spectro-deepmimo-mult8vary` private.) Contrastive caveat: with accum, SupCon sees
+  8-sample micro-batches (not 32) — MLM unaffected; cluster batch-32 run is the true-parity cross-check.
 - Downstream finetune+test (user-run): `PATCH=N MODE=downstream ARCHES=... bash run_patch_study.sh`
   (`--pool meanstd_t`); transformer_synth arm needs the cluster checkpoints pulled local first.
 Steps:
