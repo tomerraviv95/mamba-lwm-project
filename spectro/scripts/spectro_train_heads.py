@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from spectro_data import PROTOCOLS, load_spectro_data  # noqa: E402
+from spectro_data import PROTOCOLS, load_spectro_data, load_synthetic_data  # noqa: E402
 from spectro_moe import SpectroMoE  # noqa: E402
 from spectro_patchify import spectrogram_patchify, patch_geometry  # noqa: E402
 from spectro_sweep import run_sweep  # noqa: E402
@@ -104,13 +104,25 @@ def main():
                     help='patch side; must match the pretrained checkpoints. Stamped into the submission dir.')
     ap.add_argument('--pool', choices=['mean', 'cls', 'meanstd_t'], default='meanstd_t',
                     help="MoE-arm embedding pooling. M1 recipe default 'meanstd_t' (mean ++ per-freq temporal std).")
+    ap.add_argument('--synth-dir', default=None,
+                    help="evaluate IN-DOMAIN on a held-out synthetic corpus dir (manifest.json + shards) "
+                         "instead of the demo. Use a corpus DISJOINT from pretraining (e.g. held-out cities) "
+                         "to measure honest lift over random-init. The 'transformer' (published) arm is "
+                         "unavailable here (no precomputed embeddings for synthetic data).")
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    data = load_spectro_data(seed=args.seed)
+    if args.synth_dir:
+        if args.arm == 'transformer':
+            raise SystemExit("--arm transformer (published baseline) needs precomputed demo embeddings; "
+                             "it cannot run on a synthetic --synth-dir. Use transformer_synth/mamba/random_init/raw.")
+        data = load_synthetic_data(args.synth_dir, seed=args.seed)
+    else:
+        data = load_spectro_data(seed=args.seed)
 
-    print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} ...")
+    print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} "
+          f"eval={'synth:'+os.path.basename(args.synth_dir.rstrip('/')) if args.synth_dir else 'demo'} ...")
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
     elif args.arm == 'random_init':
@@ -123,7 +135,8 @@ def main():
         features = _raw_features(data, patch=args.patch)
     print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")
 
-    out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}')
+    tag = '_heldout' if args.synth_dir else ''   # keep in-domain results separate from the demo sweep
+    out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}{tag}')
     run_sweep(args.arm, features, data, out_dir, seed=args.seed, device=device,
               epochs_override=args.epochs)
     print(f"\nDone. Results -> {out_dir}/aggregated_results.json")

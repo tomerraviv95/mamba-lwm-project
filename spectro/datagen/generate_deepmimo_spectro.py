@@ -38,11 +38,15 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 _DEFAULT_OUT = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo')
 
 
-def build_pdp_pool(per_city, seed):
-    """Sample ``per_city`` valid user PDPs from each city; return stacked, K-padded tables + city idx."""
+def build_pdp_pool(per_city, seed, cities=None):
+    """Sample ``per_city`` valid user PDPs from each city; return stacked, K-padded tables + city idx.
+
+    ``cities``: optional list of scenario names to use instead of the default ``CITY_SCENARIOS``
+    (e.g. held-out cities for a cross-environment eval set)."""
+    scenarios = cities or CITY_SCENARIOS
     rng = np.random.RandomState(seed)
     parts = defaultdict(list)
-    for ci, scn in enumerate(CITY_SCENARIOS):
+    for ci, scn in enumerate(scenarios):
         pdp = extract_city_pdp(scn, bs_idx=1)
         u = pdp['delay'].shape[0]
         idx = rng.permutation(u)[:min(per_city, u)]
@@ -77,13 +81,21 @@ def main():
     ap.add_argument('--complex', action='store_true',
                     help='store (2,128,128) [real,imag] complex spectrograms (element_length=32) '
                          'instead of (1,128,128) magnitude — the authors\' contrastive representation')
+    ap.add_argument('--cities', default=None,
+                    help='comma-separated scenario names to use instead of the default 20 CITY_SCENARIOS '
+                         '(e.g. held-out cities asu_campus_3p5,boston5g_3p5,o1_3p5 for a cross-environment '
+                         'eval set with no overlap with the pretraining corpus).')
     args = ap.parse_args()
+    cities = [c.strip() for c in args.cities.split(',')] if args.cities else None
     if args.smoke:
         args.per_city = 20
 
     os.makedirs(args.out, exist_ok=True)
-    print(f"Building PDP pool ({args.per_city}/city, device={DEVICE}) ...")
-    delays, powers, phases, aoas, city = build_pdp_pool(args.per_city, args.seed)
+    used_cities = cities or CITY_SCENARIOS
+    print(f"Building PDP pool ({args.per_city}/city x {len(used_cities)} cities, device={DEVICE}) ...")
+    if cities:
+        print(f"  cities override: {used_cities}")
+    delays, powers, phases, aoas, city = build_pdp_pool(args.per_city, args.seed, cities)
     n = delays.shape[0]
 
     # random (tech, mod, snr, mobility) per sample
@@ -146,7 +158,7 @@ def main():
         torch.save(buffer, p_); shard_paths.append(os.path.basename(p_))
 
     manifest = {'n_samples': made, 'shards': shard_paths, 'shard_size': args.shard_size,
-                'per_city': args.per_city, 'cities': CITY_SCENARIOS, 'seed': args.seed,
+                'per_city': args.per_city, 'cities': used_cities, 'seed': args.seed,
                 'complex': bool(args.complex), 'symbol_mult': args.symbol_mult,
                 'vary_speed': bool(args.vary_speed),
                 'source': 'deepmimo-channel-spectrograms',
