@@ -241,6 +241,34 @@ w/ meanstd_t and re-run the sweep (transformer/mamba vs random on held-out demo)
 
 ---
 
+## M6 — In-domain eval on held-out cities (clean lift over random-init)  ·  STATUS: DONE (seed 1)
+**Goal:** measure honest pretraining lift in-domain (pretrain & eval share our DeepMIMO generator),
+removing the cross-generator confound of the demo tasks. Eval set = **held-out cities** asu_campus(BS1)/
+boston5g(BS2)/o1(BS3) — disjoint from the 20 pretrain `city_*`, same recipe (mult8/vary, seed 1234),
+6000 samples, leakage-free (never in pretraining as inputs OR contrastive labels). Frozen embedding ->
+MLP head: train fits / val early-stops / test (899) reported. `--cities name:bs_idx` (gen) + `--synth-dir`
+(sweep) + chained driver `cluster/run_indomain_eval.sh`. Gen needed per-city BS + `--batch 2`
+(+expandable_segments) — o1 path count × mult8 OOM'd at batch 8 on the 8GB card.
+
+**RESULT (acc @100%, held-out test; chance mod .20 / snr .14 / mob .33):**
+| patch | arm | mod | snr | mob |
+|---|---|---|---|---|
+| p4 | mamba / TF-ours / rand-init | .398/.207/.264 | .953/.882/.881 | .557/.501/.492 |
+| p6 | mamba / TF-ours / rand-init | .331/.258/.211 | .924/.924/.821 | .525/.499/.481 |
+| p8 | mamba / TF-ours / rand-init | .406/.293/.234 | .919/.909/.855 | .493/.471/.447 |
+
+**LIFT over random-init — mamba p4/p6/p8:** mod **+.135/+.120/+.172**, snr +.072/+.103/+.063,
+mob +.066/+.044/+.046. TF-ours: mod −.057/+.047/+.059, snr +.001/+.103/+.053, mob +.009/+.019/+.023.
+**Findings:** (1) IN-DOMAIN pretraining lift is clear & consistent for mamba on all 3 tasks, and MUCH
+larger than the cross-generator demo (mamba mod +.12–.17 in-domain vs ~+.02 demo) → the small demo lift
+was domain mismatch, NOT weak pretraining. (2) mobility lifts in-domain too (+.04–.07, abs ~.5 vs demo
+.42) → the M5 ceiling was partly the cross-generator gap. (3) mamba > transformer in-domain and
+generalizes cross-environment far better (TF-ours lift weak/mixed, even −.06 p4 mod) — favorable for the
+Mamba MoE. Caveats: modulation is hard here (multipath magnitude → ~.2–.4, read as lift not absolute);
+single seed (confirm with M4). Per-arm radar charts written; no combined `_heldout` line plot yet.
+
+---
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.
