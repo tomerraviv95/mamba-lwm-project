@@ -68,6 +68,29 @@ def iq_batch_to_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int 
     return db.to(torch.float16)                                    # (n,1,out,out)
 
 
+def grid_mag_to_spectrogram(grid_mag: torch.Tensor, out_size: int = OUT_SIZE,
+                            normalize: bool = True) -> torch.Tensor:
+    """Received resource-grid magnitude -> (n,1,out,out) float16 dB z-scored spectrogram.
+
+    ``grid_mag``: (n, num_ofdm_symbols, fft_size) magnitude of the DEMODULATED received grid |Y[k,n]|.
+    Unlike ``iq_batch_to_spectrogram`` (|STFT| of the time-domain OFDM waveform, which averages the
+    constellation away by CLT so modulation is invisible), the resource grid preserves each
+    subcarrier's symbol amplitude -> modulation order IS visible (BPSK ~constant |.|, high-QAM many
+    levels), while SNR (per-cell noise), fading (across subcarriers) and Doppler (across symbols)
+    remain. Same dB + per-sample z-score contract as the STFT path."""
+    g = grid_mag if torch.is_tensor(grid_mag) else torch.as_tensor(grid_mag)
+    g = g.float()
+    if g.dim() == 2:
+        g = g[None]
+    db = 20.0 * torch.log10(g + 1e-8).unsqueeze(1)                  # (n,1,n_sym,fft)
+    db = F.interpolate(db, size=(out_size, out_size), mode="bilinear", align_corners=False)
+    if normalize:
+        mean = db.mean(dim=(1, 2, 3), keepdim=True)
+        std = torch.clamp(db.std(dim=(1, 2, 3), keepdim=True), min=1e-6)
+        db = (db - mean) / std
+    return db.to(torch.float16)                                    # (n,1,out,out)
+
+
 def iq_batch_to_complex_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int = OUT_SIZE,
                                     normalize: bool = True) -> torch.Tensor:
     """Batched COMPLEX spectrogram: (n, T) complex -> (n, 2, out, out) float16 [real, imag].
