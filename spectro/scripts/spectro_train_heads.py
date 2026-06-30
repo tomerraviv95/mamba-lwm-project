@@ -56,15 +56,15 @@ def _random_init_features(data, device, arch='transformer', pool='mean', seed=42
                                   protocol_idx=data.protocol, device=device)
 
 
-def _moe_features(data, device, routing, arch, patch, pool='mean') -> torch.Tensor:
+def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffix='') -> torch.Tensor:
     """Load a pretrained MoE (Mamba or Transformer) at the given patch size and extract routed
     embeddings -> (N, d_model). Geometry (element_length, max_len, patch) is read from the checkpoint."""
     from spectro_pretrain import weights_dir
-    wdir = weights_dir(arch, patch)
+    wdir = weights_dir(arch, patch, weights_suffix)
     if not os.path.exists(os.path.join(wdir, 'router.pth')):
         # legacy fallback: pre-M3 patch-4 checkpoints live in the un-suffixed dir (spectro_{arch}_weights)
         legacy = os.path.join(_PRETRAINED, f'spectro_{arch}_weights')
-        if patch == 4 and os.path.exists(os.path.join(legacy, 'router.pth')):
+        if not weights_suffix and patch == 4 and os.path.exists(os.path.join(legacy, 'router.pth')):
             wdir = legacy
         else:
             raise FileNotFoundError(
@@ -109,6 +109,8 @@ def main():
                          "instead of the demo. Use a corpus DISJOINT from pretraining (e.g. held-out cities) "
                          "to measure honest lift over random-init. The 'transformer' (published) arm is "
                          "unavailable here (no precomputed embeddings for synthetic data).")
+    ap.add_argument('--weights-suffix', default='',
+                    help="load MoE checkpoints from spectro_{arch}_p{patch}_{suffix}_weights (e.g. 'grid').")
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     args = ap.parse_args()
 
@@ -130,12 +132,14 @@ def main():
                                          patch=args.patch, pool=args.pool)
     elif args.arm in _MOE_ARMS:
         arch = _MOE_ARMS[args.arm]
-        features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool)
+        features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool,
+                                 weights_suffix=args.weights_suffix)
     else:
         features = _raw_features(data, patch=args.patch)
     print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")
 
-    tag = '_heldout' if args.synth_dir else ''   # keep in-domain results separate from the demo sweep
+    # keep in-domain (_heldout) and representation (_grid) results separate from the demo/STFT sweeps
+    tag = ('_heldout' if args.synth_dir else '') + (f'_{args.weights_suffix}' if args.weights_suffix else '')
     out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}{tag}')
     run_sweep(args.arm, features, data, out_dir, seed=args.seed, device=device,
               epochs_override=args.epochs)

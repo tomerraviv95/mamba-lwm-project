@@ -142,6 +142,9 @@ def main():
     ap.add_argument('--eval-every', type=int, default=2000, help='demo-probe every N steps')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
     ap.add_argument('--batch-size', type=int, default=None)
+    ap.add_argument('--weights-suffix', default='',
+                    help="suffix for the weights dir -> spectro_{arch}_p{patch}_{suffix}_weights (e.g. "
+                         "'grid' so grid-representation checkpoints don't clobber the STFT ones).")
     ap.add_argument('--accum-steps', type=int, default=1,
                     help='gradient accumulation: micro-batches per optimizer step. Effective batch = '
                          'batch-size * accum-steps. Use e.g. --batch-size 8 --accum-steps 4 (=eff 32) so a '
@@ -178,14 +181,14 @@ def main():
     channels = sp.shape[1] if sp.ndim == 4 else 1
     geom = patch_geometry(args.patch, channels=channels)
     args.element_length, args.max_len = geom['element_length'], geom['max_len']
-    out_dir = weights_dir(args.arch, args.patch); os.makedirs(out_dir, exist_ok=True)
+    out_dir = weights_dir(args.arch, args.patch, args.weights_suffix); os.makedirs(out_dir, exist_ok=True)
 
     wandb_run = None
     if args.wandb:
         try:
             import wandb
             wandb_run = wandb.init(project=args.wandb_project,
-                                   name=args.run_name or f"real-{args.arch}-p{args.patch}",
+                                   name=args.run_name or f"real-{args.arch}-p{args.patch}{('-'+args.weights_suffix) if args.weights_suffix else ''}",
                                    config=vars(args))
         except Exception as e:
             print(f"WARNING: wandb init failed ({e}); continuing without it.")
