@@ -20,12 +20,14 @@ PY=.venv/bin/python
     sleep 120
   done
   export CUDA_VISIBLE_DEVICES=0
-  # 1. held-out-cities eval set (same mult8/vary recipe, new seed, disjoint cities)
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduce fragmentation on the 8GB card
+  # 1. held-out-cities eval set (same mult8/vary recipe, new seed, disjoint cities). --batch 2: o1 has
+  #    very high path counts and symbol-mult 8 makes cir_to_time_channel huge -> batch 8 OOMs on 8GB.
   if [ ! -f "$EVAL/manifest.json" ]; then
     echo "generating held-out eval set $(date)"
     $PY spectro/datagen/generate_deepmimo_spectro.py --out "$EVAL" \
       --cities asu_campus_3p5:1,boston5g_3p5:2,o1_3p5:3 --symbol-mult 8 --vary-speed \
-      --per-city 2000 --seed 1234 --batch 8 || { echo "GEN FAILED $(date)"; exit 1; }
+      --per-city 2000 --seed 1234 --batch 2 || { echo "GEN FAILED $(date)"; exit 1; }
   else
     echo "eval set already present, skipping gen"
   fi
