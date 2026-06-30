@@ -43,11 +43,12 @@ def build_pdp_pool(per_city, seed, cities=None):
 
     ``cities``: optional list of scenario names to use instead of the default ``CITY_SCENARIOS``
     (e.g. held-out cities for a cross-environment eval set)."""
-    scenarios = cities or CITY_SCENARIOS
+    scenarios = cities or [(s, 1) for s in CITY_SCENARIOS]   # list of (scenario_name, bs_idx)
     rng = np.random.RandomState(seed)
     parts = defaultdict(list)
-    for ci, scn in enumerate(scenarios):
-        pdp = extract_city_pdp(scn, bs_idx=1)
+    for ci, item in enumerate(scenarios):
+        scn, bs = item if isinstance(item, (tuple, list)) else (item, 1)
+        pdp = extract_city_pdp(scn, bs_idx=bs)
         u = pdp['delay'].shape[0]
         idx = rng.permutation(u)[:min(per_city, u)]
         for k in ('delay', 'power_linear', 'phase', 'aoa_az'):
@@ -82,19 +83,25 @@ def main():
                     help='store (2,128,128) [real,imag] complex spectrograms (element_length=32) '
                          'instead of (1,128,128) magnitude — the authors\' contrastive representation')
     ap.add_argument('--cities', default=None,
-                    help='comma-separated scenario names to use instead of the default 20 CITY_SCENARIOS '
-                         '(e.g. held-out cities asu_campus_3p5,boston5g_3p5,o1_3p5 for a cross-environment '
-                         'eval set with no overlap with the pretraining corpus).')
+                    help='comma-separated scenario names (optionally name:bs_idx) to use instead of the '
+                         'default 20 CITY_SCENARIOS. Held-out cross-environment eval set with their BS sets: '
+                         'asu_campus_3p5:1,boston5g_3p5:2,o1_3p5:3 (each scenario exposes a different TX set).')
     args = ap.parse_args()
-    cities = [c.strip() for c in args.cities.split(',')] if args.cities else None
+    cities = None
+    if args.cities:
+        cities = []
+        for c in args.cities.split(','):
+            c = c.strip()
+            name, bs = (c.rsplit(':', 1)[0], int(c.rsplit(':', 1)[1])) if ':' in c else (c, 1)
+            cities.append((name, bs))
     if args.smoke:
         args.per_city = 20
 
     os.makedirs(args.out, exist_ok=True)
-    used_cities = cities or CITY_SCENARIOS
+    used_cities = [c[0] for c in cities] if cities else CITY_SCENARIOS
     print(f"Building PDP pool ({args.per_city}/city x {len(used_cities)} cities, device={DEVICE}) ...")
     if cities:
-        print(f"  cities override: {used_cities}")
+        print(f"  cities override: {cities}")
     delays, powers, phases, aoas, city = build_pdp_pool(args.per_city, args.seed, cities)
     n = delays.shape[0]
 

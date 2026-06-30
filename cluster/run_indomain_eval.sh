@@ -24,7 +24,7 @@ PY=.venv/bin/python
   if [ ! -f "$EVAL/manifest.json" ]; then
     echo "generating held-out eval set $(date)"
     $PY spectro/datagen/generate_deepmimo_spectro.py --out "$EVAL" \
-      --cities asu_campus_3p5,boston5g_3p5,o1_3p5 --symbol-mult 8 --vary-speed \
+      --cities asu_campus_3p5:1,boston5g_3p5:2,o1_3p5:3 --symbol-mult 8 --vary-speed \
       --per-city 2000 --seed 1234 --batch 8 || { echo "GEN FAILED $(date)"; exit 1; }
   else
     echo "eval set already present, skipping gen"
