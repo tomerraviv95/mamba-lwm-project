@@ -83,7 +83,9 @@ def grid_mag_to_spectrogram(grid_mag: torch.Tensor, out_size: int = OUT_SIZE,
     if g.dim() == 2:
         g = g[None]
     db = 20.0 * torch.log10(g + 1e-8).unsqueeze(1)                  # (n,1,n_sym,fft)
-    db = F.interpolate(db, size=(out_size, out_size), mode="bilinear", align_corners=False)
+    # NEAREST (not bilinear): bilinear averages neighbouring resource elements, which washes out the
+    # per-RE constellation amplitude that carries modulation. Nearest samples native REs (no averaging).
+    db = F.interpolate(db, size=(out_size, out_size), mode="nearest")
     if normalize:
         mean = db.mean(dim=(1, 2, 3), keepdim=True)
         std = torch.clamp(db.std(dim=(1, 2, 3), keepdim=True), min=1e-6)

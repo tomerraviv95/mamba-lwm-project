@@ -269,6 +269,31 @@ single seed (confirm with M4). Per-arm radar charts written; no combined `_heldo
 
 ---
 
+## M7 — Why modulation is near-chance, and the fix  ·  STATUS: ROOT-CAUSED + FIX VALIDATED (not integrated)
+**Question:** in-domain modulation was ~chance (M6), unlike the demo's 0.96. Why, and how to fix.
+**ROOT CAUSE (proven):** our spectrograms are `|STFT|` of the **time-domain OFDM waveform**. OFDM sums
+52–624 subcarriers → by CLT the time signal is ~Gaussian regardless of constellation, so BPSK and
+QAM256 are statistically identical in magnitude. Probe (raw spectrogram → mod, chance 0.20):
+  - OURS (held-out, all features): ~chance EVEN AT 25 dB (spatial 0.21, amp-hist 0.22).
+  - DEMO (their gen): mod 0.957 @25 dB / 0.92 @15 dB / 0.63 @−5 dB (spatial mean-pool) → demo encodes it.
+So it is a **data-representation problem in our generator**, not SNR/difficulty (user was right).
+**FIX (validated, partial):** generate from the **demodulated received resource grid** `|Y[k,n]|`
+(subcarrier×symbol), where per-subcarrier constellation amplitude is visible. Added
+`grid_mag_to_spectrogram` + generator `--repr grid` (OFDMDemodulator). Findings:
+  - Full-res grid, linear `|Y|` amp-hist (WiFi 25 dB, 4-mod): **0.66** vs 0.28 for time `|y|`. ✓ grid encodes mod.
+  - 128×128 grid with **bilinear** resize: mod back to ~chance — resize AVERAGES neighbouring REs, washing
+    out the constellation. Switched to **nearest** resampling (samples native REs, no averaging).
+  - 128×128 grid-nearest, dB+z-score: mod rises with SNR (−5→25 dB: 0.25→0.47); aggregate ~0.35.
+    Better than chance & SNR-sensible, but FAR below demo 0.96 and the full-res 0.66.
+**OPEN:** (a) more representation tuning to close the gap — linear `|Y|` (dB compresses the amplitude
+levels), native 128×128 crop instead of subsample, maybe equalization; (b) the pretrained MoE arms were
+trained on STFT, so lifting the actual MoE mod numbers needs **regenerating the corpus + re-pretraining
+both arches on `--repr grid`** (~2 days). Stopped the loop here to get a decision before that recompute.
+Probes/logs: cluster/logs/m7_grid_validate.log; eval sets spectro/outputs/spectro_eval_heldout_cities_grid,
+spectro_eval_grid_nn. snr/mob also present in grid (snr 0.54, mob 0.36 patch_std @nearest).
+
+---
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.
