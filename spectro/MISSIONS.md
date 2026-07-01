@@ -294,6 +294,33 @@ spectro_eval_grid_nn. snr/mob also present in grid (snr 0.54, mob 0.36 patch_std
 
 ---
 
+## M8 — Grid re-pretrain: modulation SOLVED (representation fix integrated)  ·  STATUS: DONE
+**Committed to the grid re-pretrain (M7 fix).** Regenerated corpus (40k) + held-out-cities eval (6k) in
+`--repr grid` (nearest resample), re-pretrained BOTH arches × p4/6/8 on grid (`_grid` weights, apples-to-
+apples recipe; STFT weights preserved), ran the in-domain grid sweep, regenerated the score-vs-patch plot
+(`spectro_score_vs_patch_heldout_grid.png`). Driver `cluster/run_grid_repretrain.sh`, log m8_grid_repretrain.
+
+**RESULT (in-domain held-out cities, grid, acc @100%; chance mod .20 / snr .14 / mob .33):**
+| patch | arm | mod | snr | mob |
+|---|---|---|---|---|
+| p4 | mamba / TF-ours / rand-init / raw | **.504**/.454/.284/.197 | .911/.914/.789/.341 | .327/.345/.326/.350 |
+| p6 | mamba / TF-ours / rand-init | **.467**/.413/.253 | .904/.893/.727 | .359/.328/.330 |
+| p8 | mamba / TF-ours / rand-init | **.455**/.402/.227 | .882/.878/.715 | .355/.343/.347 |
+
+**LIFT over random-init — mamba p4/p6/p8:** mod **+.220/+.215/+.228**, snr +.122/+.177/+.167,
+mob +.001/+.029/+.008. TF-ours mod +.170/+.160/+.175.
+**Findings:** (1) MODULATION SOLVED — on grid it is genuinely learnable (raw at chance .20, backbone
+reads it) and shows the LARGEST, cleanest pretraining lift of any task (mamba **+0.22** consistently),
+vs the STFT representation where mod carried ~no real signal. (2) SNR strong with a clear lift (+.12–.18).
+(3) TRADE-OFF: grid REGRESSED mobility to ~chance (.33) vs STFT+meanstd_t's ~.50 (M6) — the two
+representations are complementary: the resource grid preserves the constellation (modulation) but its
+nearest-subsampled symbol axis loses the temporal-coherence (Doppler) that the STFT captured. (4) mamba ≥
+transformer on modulation across all patches (+.05) and matches on SNR — the cross-environment
+generalization edge holds. Single seed. NEXT IDEAS (if wanted): a 2-channel [grid | STFT] representation
+to get mod AND mobility; or per-task representation. Plot title fixed to say grid.
+
+---
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.
