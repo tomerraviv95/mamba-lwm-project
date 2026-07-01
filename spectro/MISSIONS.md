@@ -321,6 +321,17 @@ to get mod AND mobility; or per-task representation. Plot title fixed to say gri
 
 ---
 
+## M10 — Modulation ceiling: fine-tune + per-SNR (not a data/capacity limit)  ·  STATUS: DONE
+Tested the two levers for lifting modulation above the frozen-probe ~0.50 (grid mamba p4, in-domain):
+- **Fine-tune the backbone** (spectro_finetune.py, oracle routing, backbone+head, val early-stop):
+  TEST **0.452** < frozen 0.504 -> fine-tuning HURTS (overfits ~4.2k samples). More downstream data also
+  flat (M's sweep curve saturates by ~1700 samples). So ~0.50 is NOT capacity/data-limited.
+- **Per-SNR** breakdown (frozen): -5dB .22 (chance) / 0 .37 / 5 .51 / 10 .50 / 15 .62 / 20 .58 / 25 .59.
+  Modulation is unreadable at low SNR (drags the all-SNR aggregate) and plateaus ~0.6 even at high SNR
+  because the DeepMIMO multipath channel distorts the constellation in the magnitude grid.
+**Verdict:** modulation ~0.50 (all-SNR) / ~0.6 (high-SNR) is an SNR + multipath physics ceiling, not a
+model/data limit. Report it per-SNR. `spectro_finetune.py` added (reusable fine-tune arm).
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.
