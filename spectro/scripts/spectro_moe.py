@@ -25,10 +25,10 @@ from spectro_patchify import spectrogram_patchify  # noqa: E402
 class RouterNet(nn.Module):
     """Lightweight CNN router over (B,1,128,128) spectrograms (copied from LWM-Spectro)."""
 
-    def __init__(self, num_experts: int, dropout: float = 0.1):
+    def __init__(self, num_experts: int, in_channels: int = 1, dropout: float = 0.1):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=5, stride=2, padding=2),
+            nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(32), nn.SiLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64), nn.SiLU(inplace=True),
@@ -63,17 +63,18 @@ class SpectroMoE(nn.Module):
     """Per-protocol experts (``arch``) + a router; produces routed spectrogram embeddings."""
 
     def __init__(self, protocols: List[str], d_model: int = 128, pool: str = "mean",
-                 arch: str = "mamba", patch: int = 4, **expert_kwargs):
+                 arch: str = "mamba", patch: int = 4, in_channels: int = 1, **expert_kwargs):
         super().__init__()
         self.protocols = list(protocols)
         self.d_model = d_model
         self.pool = pool
         self.arch = arch
         self.patch = patch                      # patchify granularity (must match the experts' element_length)
+        self.in_channels = in_channels          # raw-spectrogram channels for the router (1 mag / 2 grid_stft|complex)
         self.experts = nn.ModuleDict({
             p: build_expert(arch, d_model=d_model, **expert_kwargs) for p in self.protocols
         })
-        self.router = RouterNet(num_experts=len(self.protocols))
+        self.router = RouterNet(num_experts=len(self.protocols), in_channels=in_channels)
 
     # --- weight (de)serialization helpers -------------------------------------------------
     def load_expert(self, protocol: str, state_dict):

@@ -96,7 +96,8 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
 
     history, step = [], 0
     accum = max(1, args.accum_steps)            # >1: micro-batch grad accumulation (effective batch = batch*accum)
-    base_acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
+    base_acc = (demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
+                if args.probe_demo else float('nan'))
     print(f"  [{proto}] step 0 (random-init) demo {eval_task} acc = {base_acc:.4f}", flush=True)
     loader_iter = itertools.cycle(loader)
     while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
@@ -122,7 +123,8 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         step += 1
 
         if step % args.eval_every == 0 or step == args.steps:
-            acc = demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
+            acc = (demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
+                   if args.probe_demo else float('nan'))
             row = {'step': step, 'mlm': mlm_v, 'sc_mod': sc_mod_v, 'sc_mob': sc_mob_v,
                    'demo_acc': acc, 'lr': opt.param_groups[0]['lr']}
             history.append(row)
@@ -181,6 +183,11 @@ def main():
     channels = sp.shape[1] if sp.ndim == 4 else 1
     geom = patch_geometry(args.patch, channels=channels)
     args.element_length, args.max_len = geom['element_length'], geom['max_len']
+    # the in-training demo probe embeds the 1-channel magnitude demo set; skip it when the corpus is
+    # multi-channel (grid_stft/complex) — the shapes don't match and it's cross-representation anyway.
+    args.probe_demo = (channels == 1)
+    if not args.probe_demo:
+        print(f"[note] corpus has {channels} channels -> skipping the 1-channel demo probe during training")
     out_dir = weights_dir(args.arch, args.patch, args.weights_suffix); os.makedirs(out_dir, exist_ok=True)
 
     wandb_run = None

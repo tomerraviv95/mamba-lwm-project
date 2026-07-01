@@ -49,9 +49,10 @@ def _random_init_features(data, device, arch='transformer', pool='mean', seed=42
     """Untrained MoE (random weights) embeddings, oracle routing -> isolates the pretraining LIFT
     (random-init backbone is the no-pretraining-but-same-architecture baseline)."""
     torch.manual_seed(seed)
-    geom = patch_geometry(patch)
+    channels = data.spectrograms.shape[1] if data.spectrograms.ndim == 4 else 1
+    geom = patch_geometry(patch, channels=channels)
     moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool, patch=patch,
-                     element_length=geom['element_length'], max_len=geom['max_len'])
+                     element_length=geom['element_length'], max_len=geom['max_len'], in_channels=channels)
     return moe.extract_embeddings(data.spectrograms, routing='oracle',
                                   protocol_idx=data.protocol, device=device)
 
@@ -78,9 +79,10 @@ def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffi
     geom = patch_geometry(sample_expert.get('patch', patch))
     element_length = sample_expert.get('element_length', geom['element_length'])
     max_len = sample_expert.get('max_len', geom['max_len'])
+    in_channels = max(1, element_length // (patch * patch))     # 2 for grid_stft/complex checkpoints
 
     moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool=pool, patch=patch,
-                     element_length=element_length, max_len=max_len)
+                     element_length=element_length, max_len=max_len, in_channels=in_channels)
     for proto in PROTOCOLS:
         ckpt = torch.load(os.path.join(wdir, f'{proto}_expert.pth'),
                           map_location='cpu', weights_only=False)

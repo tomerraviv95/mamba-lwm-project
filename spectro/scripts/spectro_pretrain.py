@@ -206,7 +206,8 @@ def train_router(specs: torch.Tensor, protocol: np.ndarray, *, epochs, lr, batch
     tr_loader = DataLoader(TensorDataset(specs[tr_i], y[tr_i]), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(specs[val_i], y[val_i]), batch_size=batch_size, shuffle=False)
 
-    router = RouterNet(num_experts=len(PROTOCOLS)).to(device)
+    in_ch = specs.shape[1] if specs.ndim == 4 else 1        # 2 for grid_stft/complex corpora
+    router = RouterNet(num_experts=len(PROTOCOLS), in_channels=in_ch).to(device)
     opt = torch.optim.AdamW(router.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     best_acc, best_state = -1.0, None
