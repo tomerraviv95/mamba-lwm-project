@@ -332,6 +332,29 @@ Tested the two levers for lifting modulation above the frozen-probe ~0.50 (grid 
 **Verdict:** modulation ~0.50 (all-SNR) / ~0.6 (high-SNR) is an SNR + multipath physics ceiling, not a
 model/data limit. Report it per-SNR. `spectro_finetune.py` added (reusable fine-tune arm).
 
+## M9 — Dual [STFT|grid]: all three tasks solved together  ·  STATUS: DONE
+Committed to the 2-channel [STFT(ch0)|grid(ch1)] representation (--repr grid_stft) so modulation (grid
+channel: constellation) and mobility (STFT channel: Doppler with data averaged out) coexist without
+competing. Regenerated corpus(40k)+held-out-cities eval(6k) in grid_stft, re-pretrained BOTH arches x
+p4/6/8 (_gridstft weights, apples-to-apples recipe), swept, plotted (spectro_score_vs_patch_heldout_gridstft.png).
+
+**RESULT (in-domain held-out, acc @100%; chance mod .20/snr .14/mob .33):**
+| patch | arm | mod | snr | mob |
+|---|---|---|---|---|
+| p4 | mamba/TF/rand | .610/.525/.364 | .941/.920/.867 | .499/.376/.463 |
+| p6 | mamba/TF/rand | .536/.445/.267 | .941/.910/.798 | .430/.424/.418 |
+| p8 | mamba/TF/rand | .573/.440/.283 | .899/.872/.764 | .427/.423/.396 |
+LIFT over rand-init (mamba): mod +.25/+.27/+.29, snr +.08/+.14/+.14, mob +.04/+.01/+.03.
+
+**Findings:** all three tasks work in ONE model. (1) Modulation SOLVED and even higher than grid-only
+(mamba .61 p4 vs .50 grid-only) with a large lift (+.25-.29) — the STFT channel adds complementary
+signal. (2) SNR strong (.90-.94, lift +.08-.14). (3) Mobility RECOVERED to ~.43-.50 (vs grid-only's
+chance .33) — the STFT channel restores Doppler; pretraining lift is small (rand-init already ~.4-.46
+from the STFT channel + meanstd_t readout, consistent with M5/M6: mobility is representation-driven, not
+pretraining-driven). mamba > transformer on modulation across all patches (+.05-.13). p4 mamba is the best
+all-rounder (.610/.941/.499). Reframing: not "STFT vs grid" — it's two STFT alignments (generic->Doppler,
+symbol-aligned/grid->constellation), consistent with the paper's STFT pipeline. Single seed.
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.

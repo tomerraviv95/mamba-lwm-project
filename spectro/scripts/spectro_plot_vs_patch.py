@@ -88,7 +88,8 @@ def main():
         ax.grid(True, alpha=0.3)
 
     axes[0].legend(loc='best', fontsize=9)
-    scope = ('in-domain held-out cities, grid repr' if 'grid' in args.suffix
+    scope = ('in-domain held-out cities, dual [STFT|grid] repr' if 'gridstft' in args.suffix
+             else 'in-domain held-out cities, grid repr' if 'grid' in args.suffix
              else 'in-domain held-out cities' if '_heldout' in args.suffix else 'demo')
     fig.suptitle(f'Downstream accuracy vs. patch size ({scope}, {args.pct}% train)', y=1.02, fontsize=14)
     fig.tight_layout()
