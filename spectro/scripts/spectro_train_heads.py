@@ -147,6 +147,12 @@ def main():
     ap.add_argument('--weights-suffix', default='',
                     help="load MoE checkpoints from spectro_{arch}_p{patch}_{suffix}_weights (e.g. 'grid').")
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
+    ap.add_argument('--sample-counts', type=int, nargs='+', default=None,
+                    help='absolute #training-samples to sweep (e.g. 50 100 250 500 1000 2500 4000). '
+                         'Overrides the default percentage sweep.')
+    ap.add_argument('--seeds', type=int, nargs='+', default=None,
+                    help='average each sample point over these head-training seeds (e.g. 42 43 44) '
+                         'to smooth curve noise. Feature extraction is unaffected (single data split).')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -178,8 +184,8 @@ def main():
     # keep in-domain (_heldout) and representation (_grid) results separate from the demo/STFT sweeps
     tag = ('_heldout' if args.synth_dir else '') + (f'_{args.weights_suffix}' if args.weights_suffix else '')
     out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}{tag}')
-    run_sweep(args.arm, features, data, out_dir, seed=args.seed, device=device,
-              epochs_override=args.epochs)
+    run_sweep(args.arm, features, data, out_dir, seed=args.seed, seeds=args.seeds,
+              sample_counts=args.sample_counts, device=device, epochs_override=args.epochs)
     print(f"\nDone. Results -> {out_dir}/aggregated_results.json")
 
 

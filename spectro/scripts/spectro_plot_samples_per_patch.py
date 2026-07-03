@@ -48,7 +48,7 @@ _PATCH_INDEPENDENT = {'resnet18', 'resnet50'}
 
 
 def _curve(arm, patch, suffix, task_key):
-    """(#samples, accuracy) point lists for (arm, patch, task), sorted by sample count, or None."""
+    """(#samples, mean-acc, std) lists for (arm, patch, task), sorted by sample count, or None."""
     path = os.path.join(_SUBMISSIONS, f'submission_spectro_{arm}_p{patch}{suffix}', 'aggregated_results.json')
     if not os.path.exists(path) and arm in _PATCH_INDEPENDENT:
         path = os.path.join(_SUBMISSIONS, f'submission_spectro_{arm}_p4{suffix}', 'aggregated_results.json')
@@ -56,11 +56,11 @@ def _curve(arm, patch, suffix, task_key):
         return None
     d = json.load(open(path))
     r = d.get('results_by_task', {}).get(task_key, {}).get('results', {})
-    pts = sorted((v['n_samples'], v['score']) for v in r.values())
+    pts = sorted((v['n_samples'], v['score'], v.get('score_std', 0.0)) for v in r.values())
     if not pts:
         return None
-    xs, ys = zip(*pts)
-    return list(xs), list(ys)
+    xs, ys, es = zip(*pts)
+    return list(xs), list(ys), list(es)
 
 
 def _scope(suffix):
@@ -91,18 +91,24 @@ def main():
                 if not c:
                     continue
                 drew_any = True
-                xs, ys = c
+                xs, ys, es = c
                 ax.plot(xs, ys, color=color, linestyle=ls, marker=marker, label=label,
                         linewidth=3 if on_top else 1.8, markersize=9 if on_top else 6,
                         zorder=5 if on_top else 3, alpha=1.0 if on_top else 0.85)
+                if any(e > 0 for e in es):
+                    lo = [y - e for y, e in zip(ys, es)]
+                    hi = [y + e for y, e in zip(ys, es)]
+                    ax.fill_between(xs, lo, hi, color=color, alpha=0.18 if on_top else 0.10,
+                                    zorder=(4 if on_top else 2), linewidth=0)
             ax.axhline(chance, color='gray', linestyle=':', linewidth=1, alpha=0.7)
             ax.text(0.02, chance + 0.01, 'chance', color='gray', fontsize=8,
                     va='bottom', transform=ax.get_yaxis_transform())
             ax.set_title(task_name)
-            ax.set_xlabel('# training samples')
+            ax.set_xlabel('# training samples (log scale)')
             ax.set_ylabel('Test accuracy')
             ax.set_ylim(0, 1)
-            ax.grid(True, alpha=0.3)
+            ax.set_xscale('log')
+            ax.grid(True, which='both', alpha=0.3)
         if not drew_any:
             plt.close(fig)
             print(f"patch {patch}: no results for suffix={args.suffix!r} — skipped.")
