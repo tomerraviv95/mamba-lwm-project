@@ -45,6 +45,39 @@ def _raw_features(data, patch=4) -> torch.Tensor:
     return torch.tensor(patches.mean(axis=1), dtype=torch.float32)
 
 
+def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
+    """Frozen ImageNet-pretrained vision backbone as a fixed feature extractor -> (N, feat_dim).
+
+    A generic-vision baseline: the spectrogram is turned into a 3-channel 224x224 image (2-channel
+    dual [STFT|grid] -> [stft, grid, mean]; 1-channel -> replicated) and run through a frozen
+    torchvision model with its classifier removed. Shows how much a domain-agnostic pretrained CNN
+    recovers vs. our in-domain LWM MoE."""
+    import torch.nn.functional as F
+    from torchvision.models import (resnet18, ResNet18_Weights, resnet50, ResNet50_Weights)
+    ctor = {'resnet18': (resnet18, ResNet18_Weights.IMAGENET1K_V1),
+            'resnet50': (resnet50, ResNet50_Weights.IMAGENET1K_V1)}[model_name]
+    model = ctor[0](weights=ctor[1]); model.fc = torch.nn.Identity()
+    model = model.to(device).eval()
+    specs = data.spectrograms
+    if torch.is_tensor(specs):
+        specs = specs.float()
+    else:
+        specs = torch.as_tensor(np.asarray(specs), dtype=torch.float32)
+    if specs.ndim == 3:                       # (N,128,128) -> (N,1,128,128)
+        specs = specs.unsqueeze(1)
+    out = []
+    with torch.no_grad():
+        for s in range(0, specs.shape[0], batch):
+            x = specs[s:s + batch].to(device)                       # (b,C,128,128), C in {1,2}
+            if x.shape[1] == 2:
+                x = torch.stack([x[:, 0], x[:, 1], x.mean(1)], dim=1)      # 3ch [stft, grid, mean]
+            elif x.shape[1] == 1:
+                x = x.repeat(1, 3, 1, 1)
+            x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+            out.append(model(x).float().cpu())
+    return torch.cat(out)
+
+
 def _random_init_features(data, device, arch='transformer', pool='mean', seed=42, patch=4) -> torch.Tensor:
     """Untrained MoE (random weights) embeddings, oracle routing -> isolates the pretraining LIFT
     (random-init backbone is the no-pretraining-but-same-architecture baseline)."""
@@ -95,8 +128,8 @@ def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffi
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw', 'random_init'],
-                    required=True)
+    ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw', 'random_init',
+                                      'resnet18', 'resnet50'], required=True)
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
                     help='routing strategy for the synthetic-pretrained MoE arms.')
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
@@ -129,6 +162,8 @@ def main():
           f"eval={'synth:'+os.path.basename(args.synth_dir.rstrip('/')) if args.synth_dir else 'demo'} ...")
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
+    elif args.arm in ('resnet18', 'resnet50'):
+        features = _imagenet_features(data, args.arm, device)
     elif args.arm == 'random_init':
         features = _random_init_features(data, device, arch='transformer', seed=args.seed,
                                          patch=args.patch, pool=args.pool)
