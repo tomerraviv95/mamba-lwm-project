@@ -44,15 +44,21 @@ def _subsample_count(n_total: int, count: int, seed: int) -> np.ndarray:
 
 def run_sweep(arm: str, features: torch.Tensor, data: SpectroData, out_dir: str, *,
               sample_counts=None, percentages=SAMPLE_PERCENTAGES, seeds=None, seed: int = 42,
-              device: str = "cuda", epochs_override: int | None = None) -> Dict:
+              head_restarts: int = 1, device: str = "cuda", epochs_override: int | None = None) -> Dict:
     """Sample-variation sweep for one arm; write aggregated_results.json + radar chart.
 
     Two x-axis modes: absolute ``sample_counts`` (preferred, spreads the few-shot regime) or legacy
     ``percentages``. Each x-point is averaged over ``seeds`` (each seed reseeds both the training
     subsample and the head init) so the curves report mean +/- std, not a single noisy draw. The
-    frozen feature matrix is fixed; only the head training varies across seeds."""
+    frozen feature matrix is fixed; only the head training varies across seeds.
+
+    ``head_restarts`` trains that many independently-initialized heads per (task, count, seed) and
+    keeps the one with the best VALIDATION score. At tiny sample counts the head occasionally lands
+    in a degenerate (predict-one-class) basin; restarts + val-selection reject those collapses, which
+    is what smooths the low-n end of the curves."""
     os.makedirs(out_dir, exist_ok=True)
     seeds = list(seeds) if seeds else [seed]
+    head_restarts = max(1, head_restarts)
     input_dim = features.shape[1]
     train_idx, val_idx, test_idx = data.train_idx, data.val_idx, data.test_idx
     use_counts = sample_counts is not None
@@ -79,15 +85,21 @@ def run_sweep(arm: str, features: torch.Tensor, data: SpectroData, out_dir: str,
                 sel = train_idx[sub]
                 n_samples = len(sel)
                 tr_feats, tr_y = features[sel], y[sel]
-                torch.manual_seed(sd); np.random.seed(sd)
-                head = ClassificationHead(input_dim, n_classes)
-                _, _, score, _, _ = finetune(
-                    head, tr_feats, tr_y, val_feats, val_y, test_feats, test_y,
-                    score_fn=_accuracy, epochs=cfg['epochs'], lr=cfg['lr'],
-                    weight_decay=cfg['weight_decay'], batch_size=cfg['batch_size'],
-                    patience=cfg['patience'], scheduler_step=cfg['scheduler_step'],
-                    scheduler_gamma=cfg['scheduler_gamma'], device=device)
-                scores.append(score)
+                # best-of-N heads by val score: reject degenerate (collapsed-to-chance) inits at low n
+                best_val, best_score = -1.0, 0.0
+                for r in range(head_restarts):
+                    torch.manual_seed(sd * 1000 + r); np.random.seed(sd * 1000 + r)
+                    head = ClassificationHead(input_dim, n_classes)
+                    _, history, score, _, _ = finetune(
+                        head, tr_feats, tr_y, val_feats, val_y, test_feats, test_y,
+                        score_fn=_accuracy, epochs=cfg['epochs'], lr=cfg['lr'],
+                        weight_decay=cfg['weight_decay'], batch_size=cfg['batch_size'],
+                        patience=cfg['patience'], scheduler_step=cfg['scheduler_step'],
+                        scheduler_gamma=cfg['scheduler_gamma'], device=device)
+                    v = max(history['val_score']) if history['val_score'] else -1.0
+                    if v > best_val:
+                        best_val, best_score = v, score
+                scores.append(best_score)
 
             mean_s, std_s = float(np.mean(scores)), float(np.std(scores))
             key = str(n_samples) if use_counts else str(int(x * 100))
@@ -102,6 +114,7 @@ def run_sweep(arm: str, features: torch.Tensor, data: SpectroData, out_dir: str,
     aggregated = {
         'experiment_config': {
             'arm': arm, 'tasks': list(TASKS.keys()), 'feature_dim': input_dim, 'seeds': seeds,
+            'head_restarts': head_restarts,
             'x_axis': 'sample_counts' if use_counts else 'percentages',
             'sample_counts': list(sample_counts) if use_counts else None,
             'sample_percentages': None if use_counts else [int(p * 100) for p in percentages],

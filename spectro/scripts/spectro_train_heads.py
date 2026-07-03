@@ -39,6 +39,18 @@ _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
 _MOE_ARMS = {'mamba': 'mamba', 'transformer_synth': 'transformer'}
 
 
+def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torch.Tensor:
+    """Fixed seeded Gaussian random projection -> (N, out_dim). Only shrinks features WIDER than
+    out_dim; returns the input unchanged otherwise. Scaled by 1/sqrt(out_dim) so it approximately
+    preserves pairwise distances (Johnson-Lindenstrauss), giving every arm an equal-width feature
+    for a fair head comparison (e.g. ResNet-50 2048-d / ResNet-18 512-d -> 256-d like our MoE arms)."""
+    if features.shape[1] <= out_dim:
+        return features
+    g = torch.Generator().manual_seed(seed)
+    W = torch.randn(features.shape[1], out_dim, generator=g) / (out_dim ** 0.5)
+    return features.float() @ W
+
+
 def _raw_features(data, patch=4) -> torch.Tensor:
     """Mean-pooled raw patches -> (N, patch*patch) lower-bound features."""
     patches = spectrogram_patchify(data.spectrograms, patch=patch, normalize=True)  # (N,n_patches,E)
@@ -153,6 +165,12 @@ def main():
     ap.add_argument('--seeds', type=int, nargs='+', default=None,
                     help='average each sample point over these head-training seeds (e.g. 42 43 44) '
                          'to smooth curve noise. Feature extraction is unaffected (single data split).')
+    ap.add_argument('--head-restarts', type=int, default=1,
+                    help='train this many head inits per (task,count,seed), keep best-on-val. '
+                         '>1 rejects degenerate collapsed-to-chance heads at low sample counts.')
+    ap.add_argument('--project-dim', type=int, default=None,
+                    help='random-project features WIDER than this down to it (fair equal-width head '
+                         'comparison; e.g. 256 shrinks ResNet 512/2048-d, leaves our 256-d arms as-is).')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -179,13 +197,19 @@ def main():
                                  weights_suffix=args.weights_suffix)
     else:
         features = _raw_features(data, patch=args.patch)
+    if args.project_dim:
+        pre = features.shape[1]
+        features = _random_project(features, args.project_dim, seed=args.seed)
+        if features.shape[1] != pre:
+            print(f"random-projected features {pre} -> {features.shape[1]} (equal-width head comparison)")
     print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")
 
     # keep in-domain (_heldout) and representation (_grid) results separate from the demo/STFT sweeps
     tag = ('_heldout' if args.synth_dir else '') + (f'_{args.weights_suffix}' if args.weights_suffix else '')
     out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}{tag}')
     run_sweep(args.arm, features, data, out_dir, seed=args.seed, seeds=args.seeds,
-              sample_counts=args.sample_counts, device=device, epochs_override=args.epochs)
+              sample_counts=args.sample_counts, head_restarts=args.head_restarts,
+              device=device, epochs_override=args.epochs)
     print(f"\nDone. Results -> {out_dir}/aggregated_results.json")
 
 
