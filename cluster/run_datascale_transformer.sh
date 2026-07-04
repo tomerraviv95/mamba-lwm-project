@@ -11,7 +11,8 @@ set -uo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 LOG=cluster/logs/datascale_transformer.log
 PY="${PY:-uv run python}"   # cluster uses uv; override e.g. PY=.venv/bin/python locally
-export CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# respect SLURM's GPU allocation; default to 0 only for local runs
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1
 CORPUS=spectro/outputs/spectro_deepmimo_mult8_vary_gridstft
 EVAL=spectro/outputs/spectro_eval_heldout_cities_gridstft
 HF_REPO="${HF_REPO:-tomerraviv95/lwm-spectro-gridstft}"   # dual [STFT|grid] corpus+eval on HF
