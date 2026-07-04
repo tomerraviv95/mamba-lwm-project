@@ -23,8 +23,19 @@ SWEEP="--sample-counts 50 100 250 500 1000 2500 4000 --seeds 42 43 44 --head-res
 done3(){ d="spectro/outputs/pretrained_models/spectro_transformer_p${PATCH}_$1_weights"; [ "$(ls "$d" 2>/dev/null|grep -c expert.pth)" = 3 ] && [ -f "$d/router.pth" ]; }
 {
   echo "=== DATA-SCALING (transformer p$PATCH) START $(date) ==="
-  if [ ! -f "$CORPUS/manifest.json" ]; then echo "MISSING CORPUS $CORPUS — run run_gridstft_repretrain.sh first"; exit 1; fi
-  if [ ! -f "$EVAL/manifest.json" ]; then echo "MISSING EVAL $EVAL — run run_gridstft_repretrain.sh first"; exit 1; fi
+  # Self-contained: generate the dual [STFT|grid] corpus + held-out eval if absent (same commands as
+  # run_gridstft_repretrain.sh). Needs the DeepMIMO scenarios present on this machine.
+  if [ ! -f "$CORPUS/manifest.json" ]; then
+    echo "### gen grid_stft pretrain corpus (20 cities) $(date)"
+    $PY spectro/datagen/generate_deepmimo_spectro.py --out "$CORPUS" --symbol-mult 8 --vary-speed \
+      --per-city 2000 --seed 42 --batch 4 --repr grid_stft || { echo "CORPUS GEN FAILED"; exit 1; }
+  fi
+  if [ ! -f "$EVAL/manifest.json" ]; then
+    echo "### gen grid_stft held-out eval (asu/boston/o1) $(date)"
+    $PY spectro/datagen/generate_deepmimo_spectro.py --out "$EVAL" \
+      --cities asu_campus_3p5:1,boston5g_3p5:2,o1_3p5:3 --symbol-mult 8 --vary-speed \
+      --per-city 2000 --seed 1234 --batch 2 --repr grid_stft || { echo "EVAL GEN FAILED"; exit 1; }
+  fi
   for N in $SIZES; do
     K=$((N/1000)); SUF="gridstft_${K}k"
     if done3 "$SUF"; then echo "## transformer p$PATCH $SUF already done, skip pretrain"; else
