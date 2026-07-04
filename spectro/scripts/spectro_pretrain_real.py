@@ -152,6 +152,9 @@ def main():
                          'batch-size * accum-steps. Use e.g. --batch-size 8 --accum-steps 4 (=eff 32) so a '
                          'memory-heavy transformer matches mamba\'s batch 32 without OOM. Optimizer-step '
                          'count (--steps) is unchanged, so runs stay apples-to-apples.')
+    ap.add_argument('--max-samples', type=int, default=None,
+                    help='cap the TOTAL pretrain corpus to this many spectrograms (seeded subsample, '
+                         'protocol balance preserved proportionally). For data-scaling ablations.')
     ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
                     help='patch side: 4->1025 tokens/elem16, 6->442/36, 8->257/64 (baked into the weights dir name)')
     ap.add_argument('--d-model', type=int, default=128)
@@ -178,6 +181,14 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.manual_seed(args.seed)
     pre = load_synthetic_data(args.pretrain_dir, seed=args.seed)
+    if args.max_samples and args.max_samples < pre.spectrograms.shape[0]:
+        # seeded subsample of the whole corpus -> proportionally shrinks every protocol (data-scaling)
+        n_full = pre.spectrograms.shape[0]
+        idx = np.sort(np.random.RandomState(args.seed).permutation(n_full)[:args.max_samples])
+        pre.spectrograms = pre.spectrograms[torch.as_tensor(idx)]
+        pre.protocol = pre.protocol[idx]
+        pre.labels = {k: v[idx] for k, v in pre.labels.items()}
+        print(f"[data-scaling] subsampled corpus {n_full} -> {pre.spectrograms.shape[0]} (seed {args.seed})")
     demo = load_spectro_data(seed=args.seed)
     sp = pre.spectrograms
     channels = sp.shape[1] if sp.ndim == 4 else 1
