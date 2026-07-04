@@ -10,7 +10,7 @@
 set -uo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 LOG=cluster/logs/datascale_transformer.log
-PY=.venv/bin/python
+PY="${PY:-uv run python}"   # cluster uses uv; override e.g. PY=.venv/bin/python locally
 export CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 CORPUS=spectro/outputs/spectro_deepmimo_mult8_vary_gridstft
 EVAL=spectro/outputs/spectro_eval_heldout_cities_gridstft
