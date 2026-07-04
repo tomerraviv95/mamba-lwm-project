@@ -14,6 +14,7 @@ PY=.venv/bin/python
 export CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 CORPUS=spectro/outputs/spectro_deepmimo_mult8_vary_gridstft
 EVAL=spectro/outputs/spectro_eval_heldout_cities_gridstft
+HF_REPO="${HF_REPO:-tomerraviv95/lwm-spectro-gridstft}"   # dual [STFT|grid] corpus+eval on HF
 PATCH=4
 SIZES="10000 20000"
 # transformer recipe, identical to the 40k gridstft pretrain (eff batch 8*4=32, 12k steps)
@@ -23,8 +24,12 @@ SWEEP="--sample-counts 50 100 250 500 1000 2500 4000 --seeds 42 43 44 --head-res
 done3(){ d="spectro/outputs/pretrained_models/spectro_transformer_p${PATCH}_$1_weights"; [ "$(ls "$d" 2>/dev/null|grep -c expert.pth)" = 3 ] && [ -f "$d/router.pth" ]; }
 {
   echo "=== DATA-SCALING (transformer p$PATCH) START $(date) ==="
-  # Self-contained: generate the dual [STFT|grid] corpus + held-out eval if absent (same commands as
-  # run_gridstft_repretrain.sh). Needs the DeepMIMO scenarios present on this machine.
+  # Prefer pulling the prebuilt corpus+eval from HF (fast, no DeepMIMO scenarios needed).
+  if [ ! -f "$CORPUS/manifest.json" ] || [ ! -f "$EVAL/manifest.json" ]; then
+    echo "### fetching dual corpus+eval from HF ($HF_REPO) $(date)"
+    $PY spectro/scripts/hf_download_gridstft.py --repo "$HF_REPO" || echo "HF download failed; falling back to local gen"
+  fi
+  # Fallback: generate from DeepMIMO scenarios if still missing (same commands as run_gridstft_repretrain.sh).
   if [ ! -f "$CORPUS/manifest.json" ]; then
     echo "### gen grid_stft pretrain corpus (20 cities) $(date)"
     $PY spectro/datagen/generate_deepmimo_spectro.py --out "$CORPUS" --symbol-mult 8 --vary-speed \
