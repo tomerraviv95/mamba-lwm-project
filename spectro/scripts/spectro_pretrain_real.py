@@ -71,15 +71,67 @@ def demo_probe(expert, demo, p_idx, task, pool, device, patch, cap=1500, seed=0)
     return float((clf.predict(feats[te]) == y[te]).mean())
 
 
+def corpus_probe(expert, tr_specs, tr_y, val_specs, val_y, pool, device, patch, seed=0):
+    """Frozen linear probe fit on the TRAIN corpus slice, scored on both train and the held-out VAL
+    slice -> (train_acc, val_acc). The train-minus-val gap is the over/underfit signal during pretrain
+    (val rising with train = healthy; val flat/falling while train climbs = overfitting)."""
+    if len(set(np.asarray(tr_y).tolist())) < 2:
+        return float('nan'), float('nan')
+    f_tr = _embed(expert, tr_specs, pool, device, patch)
+    f_val = _embed(expert, val_specs, pool, device, patch)
+    clf = LogisticRegression(max_iter=300).fit(f_tr, np.asarray(tr_y))
+    return (float((clf.predict(f_tr) == np.asarray(tr_y)).mean()),
+            float((clf.predict(f_val) == np.asarray(val_y)).mean()))
+
+
+@torch.no_grad()
+def val_mlm_loss(model, ids, toks, pos, device, batch=64):
+    """Mean masked-reconstruction MSE on a held-out slice (validation of the MLM objective itself)."""
+    model.eval()
+    mse = nn.MSELoss(reduction='mean'); tot = 0.0; nb = 0
+    for s in range(0, ids.shape[0], batch):
+        lo, ou = model(ids[s:s + batch].to(device), pos[s:s + batch].to(device))
+        tot += mse(lo, toks[s:s + batch].to(device)).item(); nb += 1
+    model.train()
+    return tot / max(nb, 1)
+
+
 def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, device, args, wandb_run):
     """Step-based MLM+SupCon pretraining of one expert with periodic demo probing. Returns state, history."""
-    ids, toks, pos = build_masked_tensors(specs, mask_percent=args.mask_percent, seed=args.seed,
+    # carve a held-out corpus slice (excluded from MLM training) for the in-corpus train/val probe
+    specs = specs if torch.is_tensor(specs) else torch.as_tensor(np.asarray(specs))
+    n_all = specs.shape[0]
+    probe_task_y = np.asarray(mod if eval_task != 'mobility' else mob)   # snr not available here -> modulation
+    hf = max(0.0, min(0.5, args.probe_heldout_frac))
+    if hf > 0:
+        perm = np.random.RandomState(args.seed + 99).permutation(n_all)
+        n_val = min(int(hf * n_all), args.probe_cap * 2)
+        val_i, tr_i = np.sort(perm[:n_val]), np.sort(perm[n_val:])
+    else:
+        val_i, tr_i = np.array([], dtype=int), np.arange(n_all)
+    cap = args.probe_cap
+    ptr = tr_i[np.random.RandomState(args.seed).permutation(len(tr_i))[:cap]] if len(tr_i) else tr_i
+    pval = val_i[:cap]
+    probe_tr_specs, probe_tr_y = specs[torch.as_tensor(ptr)], probe_task_y[ptr]
+    probe_val_specs, probe_val_y = specs[torch.as_tensor(pval)], probe_task_y[pval]
+    # val-MLM tensors from the held-out slice (fixed mask)
+    val_mlm = None
+    if len(val_i):
+        vi = val_i[:cap]
+        vids, vtoks, vpos = build_masked_tensors(specs[torch.as_tensor(vi)], mask_percent=args.mask_percent,
+                                                 seed=args.seed + 7, patch=args.patch)
+        val_mlm = (vids, vtoks, vpos)
+
+    tr_specs = specs[torch.as_tensor(tr_i)]
+    ids, toks, pos = build_masked_tensors(tr_specs, mask_percent=args.mask_percent, seed=args.seed,
                                           patch=args.patch)
-    mod_t = torch.as_tensor(np.asarray(mod), dtype=torch.long)
-    mob_t = torch.as_tensor(np.asarray(mob), dtype=torch.long)
+    mod_t = torch.as_tensor(np.asarray(mod)[tr_i], dtype=torch.long)
+    mob_t = torch.as_tensor(np.asarray(mob)[tr_i], dtype=torch.long)
     loader = DataLoader(TensorDataset(ids, toks, pos, mod_t, mob_t),
                         batch_size=args.batch_size, shuffle=True, drop_last=True)
     p_idx = PROTOCOLS.index(proto)
+    print(f"  [{proto}] MLM train={len(tr_i)}  held-out probe/val={len(val_i)} "
+          f"(probe task={eval_task if eval_task != 'snr' else 'modulation'})", flush=True)
 
     model = build_expert(arch, d_model=args.d_model, n_layers=args.n_layers,
                          element_length=args.element_length, max_len=args.max_len).to(device)
@@ -96,9 +148,21 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
 
     history, step = [], 0
     accum = max(1, args.accum_steps)            # >1: micro-batch grad accumulation (effective batch = batch*accum)
-    base_acc = (demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
-                if args.probe_demo else float('nan'))
-    print(f"  [{proto}] step 0 (random-init) demo {eval_task} acc = {base_acc:.4f}", flush=True)
+    def _probe():
+        """(demo_acc, train_acc, val_acc, val_mlm) at the current step — nan fields when unavailable."""
+        d = (demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
+             if args.probe_demo else float('nan'))
+        if len(val_i):
+            ta, va = corpus_probe(model, probe_tr_specs, probe_tr_y, probe_val_specs, probe_val_y,
+                                  args.proj_pool, device, args.patch, seed=args.seed)
+            vm = val_mlm_loss(model, *val_mlm, device) if val_mlm is not None else float('nan')
+        else:
+            ta = va = vm = float('nan')
+        return d, ta, va, vm
+
+    base_acc, base_tr, base_val, _ = _probe()
+    print(f"  [{proto}] step 0 (random-init) demo={base_acc:.4f} probe_train={base_tr:.4f} "
+          f"probe_val={base_val:.4f}", flush=True)
     loader_iter = itertools.cycle(loader)
     while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
         model.train(); proj_mod.train(); proj_mob.train()
@@ -123,13 +187,16 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         step += 1
 
         if step % args.eval_every == 0 or step == args.steps:
-            acc = (demo_probe(model, demo, p_idx, eval_task, args.proj_pool, device, args.patch, seed=args.seed)
-                   if args.probe_demo else float('nan'))
-            row = {'step': step, 'mlm': mlm_v, 'sc_mod': sc_mod_v, 'sc_mob': sc_mob_v,
-                   'demo_acc': acc, 'lr': opt.param_groups[0]['lr']}
+            acc, probe_tr, probe_val, v_mlm = _probe()
+            gap = (probe_tr - probe_val) if (probe_tr == probe_tr and probe_val == probe_val) else float('nan')
+            row = {'step': step, 'mlm': mlm_v, 'val_mlm': v_mlm, 'sc_mod': sc_mod_v, 'sc_mob': sc_mob_v,
+                   'demo_acc': acc, 'probe_train': probe_tr, 'probe_val': probe_val, 'probe_gap': gap,
+                   'lr': opt.param_groups[0]['lr']}
             history.append(row)
-            print(f"  [{proto}] step {step}/{args.steps}  mlm={mlm_v:.4f} sc_mod={sc_mod_v:.4f} "
-                  f"sc_mob={sc_mob_v:.4f}  demo_{eval_task}={acc:.4f}", flush=True)
+            print(f"  [{proto}] step {step}/{args.steps}  mlm={mlm_v:.4f} val_mlm={v_mlm:.4f} "
+                  f"sc_mod={sc_mod_v:.4f} sc_mob={sc_mob_v:.4f}  "
+                  f"probe_{eval_task if eval_task != 'snr' else 'mod'}: train={probe_tr:.3f} "
+                  f"val={probe_val:.3f} gap={gap:+.3f}", flush=True)
             if wandb_run is not None:
                 wandb_run.log({f'{proto}/{k}': v for k, v in row.items() if k != 'step'} | {f'{proto}/step': step})
     state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -141,8 +208,15 @@ def main():
     ap.add_argument('--arch', choices=['mamba', 'transformer'], default='transformer')
     ap.add_argument('--pretrain-dir', default=os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo_150k'))
     ap.add_argument('--steps', type=int, default=30000, help='optimizer steps per expert')
-    ap.add_argument('--eval-every', type=int, default=2000, help='demo-probe every N steps')
+    ap.add_argument('--eval-every', type=int, default=2000, help='probe every N steps')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
+    ap.add_argument('--probe-heldout-frac', type=float, default=0.1,
+                    help='fraction of each expert\'s corpus slice held out from MLM training for the '
+                         'in-corpus train/val downstream probe + val-MLM loss (0 disables; the '
+                         'train-minus-val probe gap is the over/underfit signal). Works for the '
+                         'multi-channel grid_stft corpus where the 1-channel demo probe is unavailable.')
+    ap.add_argument('--probe-cap', type=int, default=1500,
+                    help='max samples embedded per side (train/val) for the periodic probe.')
     ap.add_argument('--batch-size', type=int, default=None)
     ap.add_argument('--weights-suffix', default='',
                     help="suffix for the weights dir -> spectro_{arch}_p{patch}_{suffix}_weights (e.g. "

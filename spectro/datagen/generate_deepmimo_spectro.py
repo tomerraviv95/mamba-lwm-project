@@ -40,23 +40,40 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 _DEFAULT_OUT = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo')
 
 
-def build_pdp_pool(per_city, seed, cities=None):
-    """Sample ``per_city`` valid user PDPs from each city; return stacked, K-padded tables + city idx.
+def build_pdp_pool(per_city, seed, cities=None, all_users=False,
+                   split_frac=None, split_part='train', split_seed=777):
+    """Sample user PDPs from each city; return stacked, K-padded tables + city idx.
 
     ``cities``: optional list of scenario names to use instead of the default ``CITY_SCENARIOS``
-    (e.g. held-out cities for a cross-environment eval set)."""
+    (e.g. held-out cities for a cross-environment eval set).
+    ``all_users``: use EVERY valid user in each city instead of sampling ``per_city``.
+    ``split_frac``: if set (e.g. 0.85), partition each city's users into a ``train`` fraction and the
+    complementary ``downstream`` fraction (disjoint at the USER level within the same cities) and keep
+    only ``split_part``. The partition uses a FIXED ``split_seed`` (independent of ``seed``) so the two
+    gen runs — pretrain (train) and downstream — agree on the disjoint user sets."""
     scenarios = cities or [(s, 1) for s in CITY_SCENARIOS]   # list of (scenario_name, bs_idx)
     rng = np.random.RandomState(seed)
+    split_rng = np.random.RandomState(split_seed)
     parts = defaultdict(list)
     for ci, item in enumerate(scenarios):
         scn, bs = item if isinstance(item, (tuple, list)) else (item, 1)
         pdp = extract_city_pdp(scn, bs_idx=bs)
         u = pdp['delay'].shape[0]
-        idx = rng.permutation(u)[:min(per_city, u)]
+        pool = np.arange(u)
+        if split_frac is not None:                     # user-level 85/15 partition (fixed across runs)
+            perm = split_rng.permutation(u)
+            cut = int(round(split_frac * u))
+            pool = np.sort(perm[:cut] if split_part == 'train' else perm[cut:])
+        if all_users:
+            idx = pool if split_frac is not None else np.arange(u)
+        else:
+            take = min(per_city, len(pool))
+            idx = np.sort(rng.permutation(len(pool))[:take]); idx = pool[idx]
         for k in ('delay', 'power_linear', 'phase', 'aoa_az'):
             parts[k].append(pdp[k][idx])
         parts['city'].append(np.full(len(idx), ci, dtype=np.int64))
-        print(f"  {scn}: {u} valid users -> sampled {len(idx)}")
+        tag = f" [{split_part} {split_frac:.0%}]" if split_frac is not None else ""
+        print(f"  {scn}: {u} valid users -> using {len(idx)}{tag}")
     kmax = max(a.shape[1] for a in parts['delay'])
 
     def padcat(key):
@@ -68,6 +85,19 @@ def build_pdp_pool(per_city, seed, cities=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--per-city', type=int, default=1000)
+    ap.add_argument('--all-users', action='store_true',
+                    help='use EVERY valid user in each city (ignore --per-city). Maximizes channel '
+                         'diversity — the 20 cities have ~156k users total vs the 40k we sampled before.')
+    ap.add_argument('--user-split-frac', type=float, default=None,
+                    help='partition each city\'s users into this train fraction + complement (disjoint '
+                         'at the user level, same cities). Use with --user-split-part.')
+    ap.add_argument('--user-split-part', choices=['train', 'downstream'], default='train',
+                    help='which side of the --user-split-frac partition to emit (pretrain uses train, '
+                         'the downstream eval uses downstream). Fixed split seed -> the two are disjoint.')
+    ap.add_argument('--snr-range', type=float, nargs=2, default=None, metavar=('MIN', 'MAX'),
+                    help='sample SNR CONTINUOUSLY ~U(MIN,MAX) dB instead of the 7 discrete SNRS_DB '
+                         'values (wider input-condition diversity for pretraining; SNR is not a '
+                         'pretrain label). Stored label is snapped to the nearest SNRS_DB bin.')
     ap.add_argument('--out', default=_DEFAULT_OUT)
     ap.add_argument('--batch', type=int, default=32)
     ap.add_argument('--shard-size', type=int, default=2000)
@@ -109,14 +139,22 @@ def main():
     print(f"Building PDP pool ({args.per_city}/city x {len(used_cities)} cities, device={DEVICE}) ...")
     if cities:
         print(f"  cities override: {cities}")
-    delays, powers, phases, aoas, city = build_pdp_pool(args.per_city, args.seed, cities)
+    delays, powers, phases, aoas, city = build_pdp_pool(
+        args.per_city, args.seed, cities, all_users=args.all_users,
+        split_frac=args.user_split_frac, split_part=args.user_split_part)
     n = delays.shape[0]
 
     # random (tech, mod, snr, mobility) per sample
     rng = np.random.RandomState(args.seed + 1)
     techs = rng.choice(PROTOCOLS, n)
     mods = rng.choice(MODULATIONS, n)
-    snrs = rng.choice(SNRS_DB, n)
+    if args.snr_range is not None:                      # continuous wide SNR (diversity), label -> nearest bin
+        snrs = rng.uniform(args.snr_range[0], args.snr_range[1], n).astype(np.float32)
+        _snr_bins = np.asarray(SNRS_DB, dtype=np.float32)
+        snr_labels = [int(_snr_bins[int(np.argmin(np.abs(_snr_bins - v)))]) for v in snrs]
+    else:
+        snrs = rng.choice(SNRS_DB, n)
+        snr_labels = [int(v) for v in snrs]
     mobs = rng.choice(MOBILITIES, n)
 
     # group by (tech, mod) so each batch shares an OFDM waveform config
@@ -171,7 +209,7 @@ def main():
                 _spec_fn = iq_batch_to_complex_spectrogram if args.complex else iq_batch_to_spectrogram
                 specs = _spec_fn(yn).cpu()                    # (b,1,128,128) mag or (b,2,128,128) complex
             for j, i in enumerate(bi):
-                buffer.append({'tech': tech, 'snr': snr_label(int(snrs[i])), 'mod': mod,
+                buffer.append({'tech': tech, 'snr': snr_label(snr_labels[i]), 'mod': mod,
                                'mob': mobs[i], 'city': CITY_SCENARIOS[city[i]], 'data': specs[j]})
             made += b
             while len(buffer) >= args.shard_size:
@@ -187,6 +225,9 @@ def main():
                 'per_city': args.per_city, 'cities': used_cities, 'seed': args.seed,
                 'complex': bool(args.complex), 'repr': args.repr, 'symbol_mult': args.symbol_mult,
                 'vary_speed': bool(args.vary_speed),
+                'snr_range': list(args.snr_range) if args.snr_range is not None else None,
+                'all_users': bool(args.all_users),
+                'user_split_frac': args.user_split_frac, 'user_split_part': args.user_split_part,
                 'source': 'deepmimo-channel-spectrograms',
                 'note': 'OFDM waveforms through DeepMIMO ray-traced channels (delay/power/AoA) + AWGN -> STFT.'}
     with open(os.path.join(args.out, 'manifest.json'), 'w') as f:
