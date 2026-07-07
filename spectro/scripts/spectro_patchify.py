@@ -150,7 +150,7 @@ def time_column_positions(side: int, frac: float, rng: np.random.Generator) -> n
 
 
 def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch: int = PATCH,
-                         mask_mode: str = "random"):
+                         mask_mode: str = "random", half: bool = False):
     """Build stacked (input_ids, masked_tokens, masked_pos) tensors for MLM pretraining.
 
     All 128x128 spectrograms share the same n_patches and a constant n_masks (random mode) or a
@@ -160,6 +160,10 @@ def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch
     Args:
         mask_mode: 'random' (BERT 4x4-patch masking, default) or 'time_col' (mask whole time columns
             of the patch grid -> temporal/Doppler pretext, see ``time_column_positions``).
+        half: store ``input_ids``/``masked_tokens`` as float16 (cast to float32 at use). Halves the
+            RAM footprint — needed for large corpora (~40k samples/expert would otherwise peak >25 GB).
+            The random-mode path also preallocates and uses ``torch.from_numpy`` (zero-copy) to avoid
+            the list->stack->tensor 3x transient peak. Cast back to float() before the model.
 
     Returns:
         ``(input_ids, masked_tokens, masked_pos)`` torch tensors; for patch 4: (N,1025,16),
@@ -173,16 +177,28 @@ def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch
     if mask_mode == "time_col" and side * side != n_patches:
         raise ValueError(f"time_col masking needs a square patch grid; got n_patches={n_patches}")
 
-    ids, toks, pos = [], [], []
+    store = np.float16 if half else np.float32
+    if mask_mode == "random":                        # common path: preallocate + zero-copy (low peak)
+        n, elem = patches.shape[0], patches.shape[2]
+        ids = np.empty((n, n_patches + 1, elem), dtype=store)
+        toks = np.empty((n, n_masks, elem), dtype=store)
+        pos = np.empty((n, n_masks), dtype=np.int64)
+        for i in range(n):
+            a, b, c = make_sample_spectro(patches[i], n_masks, mask=True, rng=rng, masked_pos=None)
+            ids[i], toks[i], pos[i] = a, b, c
+        return torch.from_numpy(ids), torch.from_numpy(toks), torch.from_numpy(pos)
+
+    ids, toks, pos = [], [], []                      # time_col path (rare pretext): keep list build
     for p in patches:
-        mp = time_column_positions(side, mask_percent, rng) if mask_mode == "time_col" else None
+        mp = time_column_positions(side, mask_percent, rng)
         input_ids, masked_tokens, masked_pos = make_sample_spectro(p, n_masks, mask=True, rng=rng,
                                                                    masked_pos=mp)
         ids.append(input_ids)
         toks.append(masked_tokens)
         pos.append(masked_pos)
+    tdt = torch.float16 if half else torch.float32
     return (
-        torch.tensor(np.stack(ids), dtype=torch.float32),
-        torch.tensor(np.stack(toks), dtype=torch.float32),
+        torch.tensor(np.stack(ids), dtype=tdt),
+        torch.tensor(np.stack(toks), dtype=tdt),
         torch.tensor(np.stack(pos), dtype=torch.long),
     )

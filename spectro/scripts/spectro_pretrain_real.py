@@ -90,8 +90,8 @@ def val_mlm_loss(model, ids, toks, pos, device, batch=64):
     model.eval()
     mse = nn.MSELoss(reduction='mean'); tot = 0.0; nb = 0
     for s in range(0, ids.shape[0], batch):
-        lo, ou = model(ids[s:s + batch].to(device), pos[s:s + batch].to(device))
-        tot += mse(lo, toks[s:s + batch].to(device)).item(); nb += 1
+        lo, ou = model(ids[s:s + batch].to(device).float(), pos[s:s + batch].to(device))
+        tot += mse(lo, toks[s:s + batch].to(device).float()).item(); nb += 1
     model.train()
     return tot / max(nb, 1)
 
@@ -119,12 +119,12 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     if len(val_i):
         vi = val_i[:cap]
         vids, vtoks, vpos = build_masked_tensors(specs[torch.as_tensor(vi)], mask_percent=args.mask_percent,
-                                                 seed=args.seed + 7, patch=args.patch)
+                                                 seed=args.seed + 7, patch=args.patch, half=True)
         val_mlm = (vids, vtoks, vpos)
 
     tr_specs = specs[torch.as_tensor(tr_i)]
     ids, toks, pos = build_masked_tensors(tr_specs, mask_percent=args.mask_percent, seed=args.seed,
-                                          patch=args.patch)
+                                          patch=args.patch, half=True)   # float16 -> RAM-safe for big corpora
     mod_t = torch.as_tensor(np.asarray(mod)[tr_i], dtype=torch.long)
     mob_t = torch.as_tensor(np.asarray(mob)[tr_i], dtype=torch.long)
     loader = DataLoader(TensorDataset(ids, toks, pos, mod_t, mob_t),
@@ -170,7 +170,8 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         mlm_v = sc_mod_v = sc_mob_v = 0.0
         for _ in range(accum):                  # accumulate grads over `accum` micro-batches, then one opt step
             b_ids, b_toks, b_pos, b_mod, b_mob = next(loader_iter)
-            b_ids, b_toks, b_pos = b_ids.to(device), b_toks.to(device), b_pos.to(device)
+            b_ids, b_toks = b_ids.to(device).float(), b_toks.to(device).float()  # float16 store -> float32 model
+            b_pos = b_pos.to(device)
             b_mod, b_mob = b_mod.to(device), b_mob.to(device)
             logits, output = model(b_ids, b_pos)
             mlm = mse(logits, b_toks)
@@ -229,6 +230,10 @@ def main():
     ap.add_argument('--max-samples', type=int, default=None,
                     help='cap the TOTAL pretrain corpus to this many spectrograms (seeded subsample, '
                          'protocol balance preserved proportionally). For data-scaling ablations.')
+    ap.add_argument('--max-per-expert', type=int, default=None,
+                    help='cap EACH expert\'s protocol slice to this many samples (seeded). RAM guard for '
+                         'big corpora on small-RAM hosts (the masked-tensor build peaks with slice size). '
+                         'Set past the ~13k/expert saturation point so it does not cost accuracy.')
     ap.add_argument('--patch', type=int, default=4, choices=[4, 6, 8],
                     help='patch side: 4->1025 tokens/elem16, 6->442/36, 8->257/64 (baked into the weights dir name)')
     ap.add_argument('--d-model', type=int, default=128)
@@ -291,10 +296,15 @@ def main():
           f"(w_mlm={args.w_mlm}, w_cont={args.w_cont}, tau={args.temperature}, mask={args.mask_percent})")
     for proto in PROTOCOLS:
         p_idx = PROTOCOLS.index(proto)
-        sel = pre.protocol == p_idx
+        sel = np.where(pre.protocol == p_idx)[0]
+        n_full = len(sel)
+        if args.max_per_expert and n_full > args.max_per_expert:     # RAM cap for big corpora on small hosts
+            pick = np.random.RandomState(args.seed).permutation(n_full)[:args.max_per_expert]
+            sel = sel[np.sort(pick)]
         specs = pre.spectrograms[torch.as_tensor(sel)]
         mod, mob = pre.labels['modulation'][sel], pre.labels['mobility'][sel]
-        print(f"\n[Expert {proto}] {specs.shape[0]} corpus spectrograms")
+        print(f"\n[Expert {proto}] {specs.shape[0]} corpus spectrograms"
+              + (f" (capped from {n_full} by --max-per-expert)" if args.max_per_expert and n_full > args.max_per_expert else ""))
         state, history, base = pretrain_expert_steps(specs, mod, mob, arch=args.arch, proto=proto,
                                                      demo=demo, eval_task=args.eval_task, device=device,
                                                      args=args, wandb_run=wandb_run)
