@@ -11,6 +11,9 @@ ARCH="${ARCH:-mamba}"
 LOG="cluster/logs/alluser_${ARCH}.log"
 PY="${PY:-uv run python}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1
+# xet transfer backend fails on restricted cluster networks (token-refresh over the xet CDN); force
+# the classic HTTP download path. Best practice is still to pre-pull on the login node before sbatch.
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 HF_REPO="${HF_REPO:-tomerraviv95/lwm-spectro-alluser}"
 CORPUS=spectro/outputs/spectro_deepmimo_alluser85_gridstft
 EVAL=spectro/outputs/spectro_eval_alluser15_gridstft
