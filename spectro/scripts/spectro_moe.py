@@ -126,6 +126,48 @@ class SpectroMoE(nn.Module):
                 out[torch.arange(start, start + batch.shape[0])[mask.cpu()]] = emb.cpu().float()
         return out
 
+    @torch.no_grad()
+    def _expert_sequence(self, protocol: str, specs: torch.Tensor) -> torch.Tensor:
+        """Patchify + run one expert -> the full token sequence (b, T, d_model) (T = 1 CLS + n_patches)."""
+        patches = spectrogram_patchify(specs, patch=self.patch, normalize=True)
+        cls = np.full((patches.shape[0], 1, patches.shape[2]), 0.2, dtype=np.float32)
+        input_ids = torch.tensor(np.concatenate([cls, patches], axis=1), dtype=torch.float32,
+                                 device=specs.device)
+        return self.experts[protocol].embed(input_ids, pool="seq")
+
+    @torch.no_grad()
+    def extract_sequences(self, specs: torch.Tensor, *, routing: str = "router",
+                          protocol_idx: np.ndarray | None = None, batch_size: int = 64,
+                          device: str = "cuda", store_dtype=torch.float16) -> torch.Tensor:
+        """Routed per-token sequences (N, T, d_model) for the paper's 1-D CNN downstream head.
+
+        Same routing as ``extract_embeddings`` but keeps the full token axis instead of pooling.
+        Stored as ``store_dtype`` (float16 by default) to bound RAM on large eval sets; the
+        ``Conv1dHead`` casts back to float32.
+        """
+        device = device if torch.cuda.is_available() else "cpu"
+        self.to(device).eval()
+        n = specs.shape[0]
+        # tokenization is arch/channel-independent: T = n_patches + 1 (CLS); infer from a 1-sample probe
+        probe = self._expert_sequence(self.protocols[0], specs[:1].to(device).float())
+        T, d = probe.shape[1], probe.shape[2]
+        out = torch.empty(n, T, d, dtype=store_dtype)
+        for start in range(0, n, batch_size):
+            sl = slice(start, min(start + batch_size, n))
+            batch = specs[sl].to(device).float()
+            if routing == "oracle":
+                assert protocol_idx is not None, "oracle routing needs protocol_idx"
+                expert_ids = torch.as_tensor(protocol_idx[sl], device=device)
+            else:
+                expert_ids = self.router(_normalize_per_sample(batch)).argmax(dim=1)
+            for e_idx, proto in enumerate(self.protocols):
+                mask = expert_ids == e_idx
+                if not torch.any(mask):
+                    continue
+                seq = self._expert_sequence(proto, batch[mask])
+                out[torch.arange(start, start + batch.shape[0])[mask.cpu()]] = seq.cpu().to(store_dtype)
+        return out
+
 
 # Backward-compatible alias (the MoE now holds Mamba *or* Transformer experts).
 MambaMoE = SpectroMoE

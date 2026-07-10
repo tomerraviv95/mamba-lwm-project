@@ -68,7 +68,10 @@ def pool_tokens(output: 'torch.Tensor', pool: str = "mean") -> 'torch.Tensor':
     - 'meanstd_t': (B, 2d) = [mean over patches] ++ [std over TIME-blocks per freq, meaned over freq].
       The temporal-std term keeps the per-frequency time-variation that encodes Doppler/mobility,
       which plain mean-pooling discards.
+    - 'seq': the full token sequence (B, T, d) unchanged (for the paper's 1-D CNN downstream head).
     """
+    if pool == "seq":
+        return output
     if pool == "cls":
         return output[:, 0]
     if pool == "mean":

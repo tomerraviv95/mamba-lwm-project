@@ -46,9 +46,13 @@ def main():
     ap.add_argument('--corpus-dir', default=_DEF_CORPUS)
     ap.add_argument('--eval-dir', default=_DEF_EVAL)
     ap.add_argument('--force', action='store_true', help='re-download even if the dir already exists.')
+    ap.add_argument('--only', choices=['both', 'corpus', 'eval'], default='both',
+                    help="fetch only the corpus/ or eval/ subfolder (default both).")
     args = ap.parse_args()
-    _fetch(args.repo, 'corpus', args.corpus_dir, args.force)
-    _fetch(args.repo, 'eval', args.eval_dir, args.force)
+    if args.only in ('both', 'corpus'):
+        _fetch(args.repo, 'corpus', args.corpus_dir, args.force)
+    if args.only in ('both', 'eval'):
+        _fetch(args.repo, 'eval', args.eval_dir, args.force)
 
 
 if __name__ == '__main__':

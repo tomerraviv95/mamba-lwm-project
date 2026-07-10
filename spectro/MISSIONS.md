@@ -355,6 +355,46 @@ pretraining-driven). mamba > transformer on modulation across all patches (+.05-
 all-rounder (.610/.941/.499). Reframing: not "STFT vs grid" — it's two STFT alignments (generic->Doppler,
 symbol-aligned/grid->constellation), consistent with the paper's STFT pipeline. Single seed.
 
+---
+
+## M11 — Channel DIVERSITY vs data VOLUME (all-user 85/15 split)  ·  STATUS: IN PROGRESS (setup done, runs pending)
+**Question:** the downstream accuracy-vs-#samples curves saturate by ~20–40k pretraining samples (M4/M9).
+Is that a *volume* ceiling or a *diversity* ceiling? Hypothesis (continues the M5 conclusion that the
+mobility gap is pretraining-corpus strength = large + **diverse** + in-domain): a corpus spanning ALL
+users per city — not a fixed ~2k/city sample — gives the encoder more channel diversity and should lift
+transfer beyond the volume plateau, mamba most of all (it showed the largest in-domain lifts, M6/M8/M9).
+
+**Design (leakage-safe):** all 20 pretrain cities, **85%/15% user-level split** (fixed `split_seed=777`,
+disjoint users, SAME cities) in the dual `[STFT|grid]` representation (M9 recipe: `--symbol-mult 8
+--vary-speed`, patch 4). Pretrain on the 85%-user corpus; downstream-sweep on the disjoint 15%-user eval.
+- Corpus: `spectro_deepmimo_alluser85_gridstft` — **132,748** samples (27 shards, 8.2G).
+- Eval:   `spectro_eval_alluser15_gridstft` — **23,426** samples (5 shards, 1.5G).
+- Both on HF `tomerraviv95/lwm-spectro-alluser` (corpus/ + eval/).
+- Recipe UNCHANGED from every other gridstft pretrain (`--steps 12000 --eval-every 2000 --n-layers 12
+  --router-epochs 15 --mask-percent 0.7 --w-mlm 1.0 --w-cont 0.3 --temperature 0.2 --lr 5e-4 --min-lr 1e-8
+  --warmup-frac 0.1 --weight-decay 0.05 --seed 42 --probe-heldout-frac 0.1`); TF batch 8×accum4, mamba
+  batch 32×accum1. Sweep `--sample-counts 50 100 250 500 1000 2500 4000 --seeds 42 43 44 --head-restarts 3`.
+- New this mission: an **in-corpus train/val downstream probe** (`--probe-heldout-frac 0.1`, `_probe()` logs
+  `probe_train/probe_val/probe_gap/val_mlm` per eval) to watch over/underfit during pretrain.
+
+**Infra worked out (this is where the effort went so far):**
+- RAM: float16 masked-tensor build + preallocated `torch.from_numpy` zero-copy in `build_masked_tensors`
+  (kills the list→stack→tensor 3× transient peak) + optional `--max-per-expert` subsample cap. Local CPU
+  still OOM'd on the full ~44k/expert slice → moved to the cluster.
+- Driver: `cluster/run_alluser_pretrain.sh` (`ARCH=mamba|transformer`) — pulls corpus+eval from HF if
+  missing, pretrains, then sweeps; writes `cluster/logs/alluser_${ARCH}.log`. Uses `uv run python`, GPU0.
+- Cluster HF blocker FIXED: the **xet transfer backend** fails on the restricted cluster network
+  (token-refresh over the xet CDN) → `export HF_HUB_DISABLE_XET=1` baked into the driver; best practice is
+  still to pre-pull on the login node before `sbatch` (compute nodes have little/no egress).
+
+**Status:** corpus+eval generated + on HF; driver + RAM + xet fixes committed. **No pretrain/sweep has
+completed yet** — local OOM'd, first cluster attempt failed at the HF download (now fixed). No `*alluser*`
+weights or submissions exist. NEXT: pre-download on the login node with `HF_HUB_DISABLE_XET=1`, sbatch the
+transformer then mamba arm, pull results, and fold the new sample-sweep points into the accuracy-vs-#samples
+figure to answer diversity-vs-volume.
+Run logs: `cluster/logs/alluser_{transformer,mamba}.log`
+Findings: _(to fill once the runs complete)_
+
 ### Conventions
 - Run logs live under `cluster/logs/` with the `m{N}_` prefix shown above.
 - Checkpoints carry patch (and later seed) in the dir name; configs/manifests record patch+seed.

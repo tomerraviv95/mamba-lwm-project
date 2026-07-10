@@ -3,16 +3,17 @@
 Arms (``--arm``):
 - ``transformer``: LWM-Spectro MoE *baseline* — precomputed ``moe_embedding`` (real full corpus).
 - ``transformer_synth``: our Transformer MoE pretrained on the synthetic corpus (fair vs mamba).
-- ``mamba``: our Mamba MoE pretrained on the synthetic corpus — routed embeddings (128-d).
-- ``raw``: no backbone — mean-pooled raw 4x4 patches (16-d) as a lower bound.
+- ``mamba``: our Mamba MoE pretrained on the synthetic corpus.
+- ``random_init``: untrained MoE (isolates the pretraining lift).
+- ``raw``: mean-pooled raw 4x4 patches (lower bound).
+- ``resnet18``/``resnet50``/``efficientnet_b0``/``mobilenet_v3_small``: frozen ImageNet backbones.
+- ``deepcnn``: from-scratch supervised CNN trained end-to-end (paper's Deep CNN reference).
 
-``transformer_synth`` and ``mamba`` are the *fair* backbone comparison (same data, same
-extraction); ``transformer`` is the strong real-corpus reference. Each synth arm needs its
-checkpoints from ``spectro_pretrain.py --arch {transformer,mamba}``.
-
-Each arm produces a (N, d) feature matrix once, then ``spectro_sweep.run_sweep`` trains a head
-per (task, sample-percentage) and writes
-``spectro/outputs/submissions/submission_spectro_{arm}/aggregated_results.json``.
+``transformer_synth`` and ``mamba`` are the *fair* backbone comparison (same data, same recipe).
+The MoE arms use the paper downstream head by default: a residual 1-D CNN over the encoder TOKEN
+SEQUENCE (``--head cnn1d``; ``--head mlp`` falls back to a pooled-feature probe). Metric = macro-F1
+(primary) + accuracy; the few-shot axis is ``--per-class-counts`` (samples/class) or ``--sample-counts``.
+Results -> ``spectro/outputs/submissions/submission_spectro_{arm}_p{patch}{tag}/aggregated_results.json``.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import sys
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spectro_data import PROTOCOLS, load_spectro_data, load_synthetic_data  # noqa: E402
@@ -37,6 +39,31 @@ _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
 # arm -> architecture for the synthetic-pretrained MoE arms (weights subdir is patch-parameterized
 # at call time: spectro_{arch}_p{patch}_weights).
 _MOE_ARMS = {'mamba': 'mamba', 'transformer_synth': 'transformer'}
+_IMAGENET_ARMS = ('resnet18', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_small')
+
+
+class DeepCNN(nn.Module):
+    """From-scratch supervised CNN baseline over the raw spectrogram (approximates Wu et al. [7]).
+
+    Unlike the frozen-feature arms, this one is trained END-TO-END on the labelled downstream data
+    (no pretraining) — the paper's "Deep CNN" reference that trails the LWM MoE in the few-shot regime.
+    ``feat_dim`` is the pooled feature width the sweep's linear head sits on."""
+    feat_dim = 256
+
+    def __init__(self, in_channels: int = 1):
+        super().__init__()
+
+        def block(i, o):
+            return nn.Sequential(nn.Conv2d(i, o, 3, padding=1), nn.BatchNorm2d(o),
+                                 nn.ReLU(inplace=True), nn.MaxPool2d(2))
+        self.features = nn.Sequential(
+            block(in_channels, 32), block(32, 64), block(64, 128), block(128, self.feat_dim),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten())
+
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        return self.features(x)
 
 
 def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torch.Tensor:
@@ -65,10 +92,17 @@ def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
     torchvision model with its classifier removed. Shows how much a domain-agnostic pretrained CNN
     recovers vs. our in-domain LWM MoE."""
     import torch.nn.functional as F
-    from torchvision.models import (resnet18, ResNet18_Weights, resnet50, ResNet50_Weights)
-    ctor = {'resnet18': (resnet18, ResNet18_Weights.IMAGENET1K_V1),
-            'resnet50': (resnet50, ResNet50_Weights.IMAGENET1K_V1)}[model_name]
-    model = ctor[0](weights=ctor[1]); model.fc = torch.nn.Identity()
+    from torchvision.models import (resnet18, ResNet18_Weights, resnet50, ResNet50_Weights,
+                                    efficientnet_b0, EfficientNet_B0_Weights,
+                                    mobilenet_v3_small, MobileNet_V3_Small_Weights)
+    # (ctor, weights, classifier-attribute to replace with Identity to expose the pooled feature)
+    reg = {'resnet18': (resnet18, ResNet18_Weights.IMAGENET1K_V1, 'fc'),
+           'resnet50': (resnet50, ResNet50_Weights.IMAGENET1K_V1, 'fc'),
+           'efficientnet_b0': (efficientnet_b0, EfficientNet_B0_Weights.IMAGENET1K_V1, 'classifier'),
+           'mobilenet_v3_small': (mobilenet_v3_small, MobileNet_V3_Small_Weights.IMAGENET1K_V1, 'classifier')}
+    ctor, weights, clf_attr = reg[model_name]
+    model = ctor(weights=weights)
+    setattr(model, clf_attr, torch.nn.Identity())           # -> pooled feature vector (no classifier)
     model = model.to(device).eval()
     specs = data.spectrograms
     if torch.is_tensor(specs):
@@ -90,21 +124,25 @@ def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
     return torch.cat(out)
 
 
-def _random_init_features(data, device, arch='transformer', pool='mean', seed=42, patch=4) -> torch.Tensor:
-    """Untrained MoE (random weights) embeddings, oracle routing -> isolates the pretraining LIFT
-    (random-init backbone is the no-pretraining-but-same-architecture baseline)."""
+def _random_init_features(data, device, arch='transformer', pool='mean', seed=42, patch=4,
+                          as_sequence=False) -> torch.Tensor:
+    """Untrained MoE (random weights) features, oracle routing -> isolates the pretraining LIFT
+    (random-init backbone is the no-pretraining-but-same-architecture baseline).
+    ``as_sequence`` -> (N, T, d) token sequences for the CNN head; else pooled (N, d)."""
     torch.manual_seed(seed)
     channels = data.spectrograms.shape[1] if data.spectrograms.ndim == 4 else 1
     geom = patch_geometry(patch, channels=channels)
     moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool, patch=patch,
                      element_length=geom['element_length'], max_len=geom['max_len'], in_channels=channels)
-    return moe.extract_embeddings(data.spectrograms, routing='oracle',
-                                  protocol_idx=data.protocol, device=device)
+    fn = moe.extract_sequences if as_sequence else moe.extract_embeddings
+    return fn(data.spectrograms, routing='oracle', protocol_idx=data.protocol, device=device)
 
 
-def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffix='') -> torch.Tensor:
+def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffix='',
+                  as_sequence=False) -> torch.Tensor:
     """Load a pretrained MoE (Mamba or Transformer) at the given patch size and extract routed
-    embeddings -> (N, d_model). Geometry (element_length, max_len, patch) is read from the checkpoint."""
+    features. ``as_sequence`` -> per-token (N, T, d) for the paper CNN head; else pooled (N, d).
+    Geometry (element_length, max_len, patch) is read from the checkpoint."""
     from spectro_pretrain import weights_dir
     wdir = weights_dir(arch, patch, weights_suffix)
     if not os.path.exists(os.path.join(wdir, 'router.pth')):
@@ -134,14 +172,18 @@ def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffi
         moe.load_expert(proto, ckpt['state_dict'])
     moe.router.load_state_dict(router_ckpt['state_dict'])
 
-    return moe.extract_embeddings(data.spectrograms, routing=routing,
-                                  protocol_idx=data.protocol, device=device)
+    fn = moe.extract_sequences if as_sequence else moe.extract_embeddings
+    return fn(data.spectrograms, routing=routing, protocol_idx=data.protocol, device=device)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw', 'random_init',
-                                      'resnet18', 'resnet50'], required=True)
+                                      'resnet18', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_small',
+                                      'deepcnn'], required=True)
+    ap.add_argument('--head', choices=['cnn1d', 'mlp'], default='cnn1d',
+                    help="downstream head for the MoE arms: paper residual 1-D CNN over the token "
+                         "sequence (cnn1d, default) or a pooled-feature MLP probe (mlp).")
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
                     help='routing strategy for the synthetic-pretrained MoE arms.')
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
@@ -158,10 +200,16 @@ def main():
                          "unavailable here (no precomputed embeddings for synthetic data).")
     ap.add_argument('--weights-suffix', default='',
                     help="load MoE checkpoints from spectro_{arch}_p{patch}_{suffix}_weights (e.g. 'grid').")
+    ap.add_argument('--run-tag', default='',
+                    help="extra suffix on the submission dir to disambiguate eval sets "
+                         "(e.g. 'alluser15' vs 'heldoutcities' so two evals don't collide).")
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     ap.add_argument('--sample-counts', type=int, nargs='+', default=None,
                     help='absolute #training-samples to sweep (e.g. 50 100 250 500 1000 2500 4000). '
                          'Overrides the default percentage sweep.')
+    ap.add_argument('--per-class-counts', type=int, nargs='+', default=None,
+                    help="paper few-shot axis: #training samples PER CLASS (e.g. 2 4 8 16 32 64 128 256). "
+                         "Takes priority over --sample-counts.")
     ap.add_argument('--seeds', type=int, nargs='+', default=None,
                     help='average each sample point over these head-training seeds (e.g. 42 43 44) '
                          'to smooth curve noise. Feature extraction is unaffected (single data split).')
@@ -182,34 +230,45 @@ def main():
     else:
         data = load_spectro_data(seed=args.seed)
 
-    print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} "
+    print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} head={args.head} "
           f"eval={'synth:'+os.path.basename(args.synth_dir.rstrip('/')) if args.synth_dir else 'demo'} ...")
+    seq = args.head == 'cnn1d'                    # MoE arms: extract per-token sequences for the CNN head
+    backbone_factory = embed_fn = None
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
-    elif args.arm in ('resnet18', 'resnet50'):
+    elif args.arm in _IMAGENET_ARMS:
         features = _imagenet_features(data, args.arm, device)
+    elif args.arm == 'deepcnn':
+        # end-to-end trained baseline: pass raw spectrograms; the sweep trains a fresh DeepCNN per point
+        specs = data.spectrograms
+        features = specs.float() if torch.is_tensor(specs) else torch.as_tensor(np.asarray(specs), dtype=torch.float32)
+        channels = features.shape[1] if features.dim() == 4 else 1
+        backbone_factory = lambda: DeepCNN(in_channels=channels)   # noqa: E731
+        embed_fn = lambda bb, x: bb(x)                             # noqa: E731
     elif args.arm == 'random_init':
         features = _random_init_features(data, device, arch='transformer', seed=args.seed,
-                                         patch=args.patch, pool=args.pool)
+                                         patch=args.patch, pool=args.pool, as_sequence=seq)
     elif args.arm in _MOE_ARMS:
         arch = _MOE_ARMS[args.arm]
         features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool,
-                                 weights_suffix=args.weights_suffix)
+                                 weights_suffix=args.weights_suffix, as_sequence=seq)
     else:
         features = _raw_features(data, patch=args.patch)
-    if args.project_dim:
+    if args.project_dim and features.dim() == 2:   # equal-width head comparison (pooled features only)
         pre = features.shape[1]
         features = _random_project(features, args.project_dim, seed=args.seed)
         if features.shape[1] != pre:
             print(f"random-projected features {pre} -> {features.shape[1]} (equal-width head comparison)")
-    print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features).all())}")
+    print(f"features: {tuple(features.shape)}  finite={bool(torch.isfinite(features.float()).all())}")
 
     # keep in-domain (_heldout) and representation (_grid) results separate from the demo/STFT sweeps
-    tag = ('_heldout' if args.synth_dir else '') + (f'_{args.weights_suffix}' if args.weights_suffix else '')
+    tag = (('_heldout' if args.synth_dir else '') + (f'_{args.weights_suffix}' if args.weights_suffix else '')
+           + (f'_{args.run_tag}' if args.run_tag else ''))
     out_dir = os.path.join(_SUBMISSIONS, f'submission_spectro_{args.arm}_p{args.patch}{tag}')
     run_sweep(args.arm, features, data, out_dir, seed=args.seed, seeds=args.seeds,
-              sample_counts=args.sample_counts, head_restarts=args.head_restarts,
-              device=device, epochs_override=args.epochs)
+              sample_counts=args.sample_counts, per_class_counts=args.per_class_counts,
+              head_restarts=args.head_restarts, device=device, epochs_override=args.epochs,
+              backbone_factory=backbone_factory, embed_fn=embed_fn)
     print(f"\nDone. Results -> {out_dir}/aggregated_results.json")
 
 

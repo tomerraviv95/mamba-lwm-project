@@ -1,8 +1,10 @@
 """Real STEP-BASED spectro MoE pretraining with periodic demo validation.
 
-Trains each per-protocol expert for a fixed number of optimizer STEPS (cycling the corpus) with the
-LWM-Spectro PAPER recipe (MLM + supervised contrastive on mod & mobility; lambda_recon=1.0,
-lambda_cont=0.3; tau=0.2; mask 70%; AdamW wd=0.05; lr 5e-4 with linear warmup -> cosine). Every
+Trains each per-protocol expert for a fixed number of optimizer STEPS (cycling the corpus). Following
+the LWM-Spectro paper (eq. 21), **pretraining is reconstruction-only** (masked spectrogram modeling);
+the supervised contrastive objective is a *fine-tuning*-stage loss (eq. 22) and is OFF by default here
+(``--w-cont 0``). Set ``--w-cont 0.3`` to reinstate the old MLM+SupCon pretraining (paper Table I
+lambda_cont=0.3, tau=0.2). Recipe otherwise: mask 70%, AdamW wd=0.05, lr 5e-4 linear warmup -> cosine. Every
 ``--eval-every`` steps it probes the expert on its protocol's slice of the REAL demo set for one
 downstream task (a quick logistic-regression head on the frozen mean-pooled embedding) and logs the
 accuracy alongside the train losses (stdout + CSV + optional W&B). Checkpoints -> spectro_{arch}_weights/.
@@ -135,9 +137,12 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
 
     model = build_expert(arch, d_model=args.d_model, n_layers=args.n_layers,
                          element_length=args.element_length, max_len=args.max_len).to(device)
-    proj_mod = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device)
-    proj_mob = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device)
-    params = list(model.parameters()) + list(proj_mod.parameters()) + list(proj_mob.parameters())
+    use_cont = args.w_cont > 0                   # paper: pretraining is reconstruction-only (contrastive off)
+    proj_mod = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device) if use_cont else None
+    proj_mob = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device) if use_cont else None
+    params = list(model.parameters())
+    if use_cont:
+        params += list(proj_mod.parameters()) + list(proj_mob.parameters())
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     warmup = max(1, int(args.warmup_frac * args.steps))
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [
@@ -145,6 +150,11 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.steps - warmup), eta_min=args.min_lr),
     ], milestones=[warmup])
     mse = nn.MSELoss(reduction='mean')
+
+    def _train_mode():
+        model.train()
+        if use_cont:
+            proj_mod.train(); proj_mob.train()
 
     history, step = [], 0
     accum = max(1, args.accum_steps)            # >1: micro-batch grad accumulation (effective batch = batch*accum)
@@ -165,7 +175,7 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
           f"probe_val={base_val:.4f}", flush=True)
     loader_iter = itertools.cycle(loader)
     while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
-        model.train(); proj_mod.train(); proj_mob.train()
+        _train_mode()
         opt.zero_grad()
         mlm_v = sc_mod_v = sc_mob_v = 0.0
         for _ in range(accum):                  # accumulate grads over `accum` micro-batches, then one opt step
@@ -175,13 +185,17 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
             b_mod, b_mob = b_mod.to(device), b_mob.to(device)
             logits, output = model(b_ids, b_pos)
             mlm = mse(logits, b_toks)
-            sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod, temperature=args.temperature,
-                                                 base_temperature=args.temperature)
-            sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
-                                                 base_temperature=args.temperature)
-            loss = (args.w_mlm * mlm + args.w_cont * sc_mod + args.w_cont * sc_mob) / accum
+            loss = args.w_mlm * mlm
+            if use_cont:                        # fine-tuning-stage objective (off during paper pretraining)
+                sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod, temperature=args.temperature,
+                                                     base_temperature=args.temperature)
+                sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
+                                                     base_temperature=args.temperature)
+                loss = loss + args.w_cont * sc_mod + args.w_cont * sc_mob
+                sc_mod_v += sc_mod.item() / accum; sc_mob_v += sc_mob.item() / accum
+            loss = loss / accum
             loss.backward()
-            mlm_v += mlm.item() / accum; sc_mod_v += sc_mod.item() / accum; sc_mob_v += sc_mob.item() / accum
+            mlm_v += mlm.item() / accum
         if args.grad_clip:
             torch.nn.utils.clip_grad_norm_(params, args.grad_clip)
         opt.step(); sched.step()
@@ -242,7 +256,10 @@ def main():
     # paper Table I
     ap.add_argument('--mask-percent', type=float, default=0.7)
     ap.add_argument('--w-mlm', type=float, default=1.0)
-    ap.add_argument('--w-cont', type=float, default=0.3)
+    ap.add_argument('--w-cont', type=float, default=0.0,
+                    help='supervised-contrastive weight. Paper pretraining is reconstruction-ONLY '
+                         '(default 0.0); contrastive is a fine-tuning-stage loss. Set 0.3 for the old '
+                         'MLM+SupCon pretraining.')
     ap.add_argument('--temperature', type=float, default=0.2)
     ap.add_argument('--lr', type=float, default=5e-4)
     ap.add_argument('--min-lr', type=float, default=1e-8)

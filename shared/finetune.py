@@ -76,6 +76,15 @@ def _to_loader(features: torch.Tensor, labels: torch.Tensor, batch_size: int, sh
     return DataLoader(TensorDataset(features, labels), batch_size=batch_size, shuffle=shuffle)
 
 
+@torch.no_grad()
+def _batched_infer(wrapper: nn.Module, features: torch.Tensor, device: str, batch: int) -> torch.Tensor:
+    """Run ``wrapper`` over ``features`` in chunks (keeps big sequence/backbone inputs off-GPU at once)."""
+    outs = []
+    for s in range(0, features.shape[0], batch):
+        outs.append(wrapper(features[s:s + batch].to(device)).cpu())
+    return torch.cat(outs) if outs else torch.empty(0)
+
+
 def finetune(
     head: nn.Module,
     train_features: torch.Tensor,
@@ -98,6 +107,7 @@ def finetune(
     scheduler_step: Optional[int] = None,
     scheduler_gamma: float = 0.5,
     device: str = "cuda",
+    eval_batch: int = 512,
     verbose: bool = False,
 ):
     """Train ``head`` (optionally fine-tuning ``backbone``) and evaluate on the test split.
@@ -125,7 +135,6 @@ def finetune(
     best_state = copy.deepcopy(wrapper.state_dict())
     patience_ctr = 0
 
-    val_features_d = val_features.to(device)
     for epoch in range(epochs):
         wrapper.train()
         running = 0.0
@@ -142,8 +151,7 @@ def finetune(
         history["train_loss"].append(running / max(len(train_loader.dataset), 1))
 
         wrapper.eval()
-        with torch.no_grad():
-            val_out = wrapper(val_features_d).cpu()
+        val_out = _batched_infer(wrapper, val_features, device, eval_batch)
         val_score = score_fn(val_out, val_labels)
         history["val_score"].append(val_score)
 
@@ -160,7 +168,6 @@ def finetune(
 
     wrapper.load_state_dict(best_state)
     wrapper.eval()
-    with torch.no_grad():
-        test_out = wrapper(test_features.to(device)).cpu()
+    test_out = _batched_infer(wrapper, test_features, device, eval_batch)
     test_score = score_fn(test_out, test_labels)
     return wrapper, history, test_score, test_labels, test_out

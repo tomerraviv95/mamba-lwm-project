@@ -19,13 +19,55 @@ import torch
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 _DEMO_PATH = os.path.join(_REPO_ROOT, 'spectro', 'hf_cache', 'demo_data.pt')
 
-# Downstream classification tasks (protocol/tech is the router's job, not a task).
-TASKS = {
-    'modulation': {'field': 'mod', 'name': 'Modulation'},
-    'snr':        {'field': 'snr', 'name': 'SNR'},
-    'mobility':   {'field': 'mob', 'name': 'Mobility'},
-}
 PROTOCOLS = ['LTE', 'WiFi', '5G']
+
+# Downstream classification tasks — the LWM-Spectro PAPER set:
+#   Task 1: modulation classification (5-class).
+#   Task 2: JOINT SNR/Doppler — every (SNR, mobility) pair is one class (paper Sec. V.B).
+#   Task 3: multi-protocol classification (LTE/WiFi/5G) — the MoE-router capability (paper Table III).
+# Each task lists the raw sample field(s) whose combined value defines the class; '__protocol__'
+# is the protocol index resolved from `tech`.
+TASKS = {
+    'modulation':  {'fields': ('mod',),        'name': 'Modulation'},
+    'snr_doppler': {'fields': ('snr', 'mob'),  'name': 'SNR/Doppler'},
+    'protocol':    {'fields': ('__protocol__',), 'name': 'Protocol'},
+}
+# Legacy single-field tasks (SNR / mobility split), available but not in the default paper sweep.
+EXTRA_TASKS = {
+    'snr':      {'fields': ('snr',), 'name': 'SNR'},
+    'mobility': {'fields': ('mob',), 'name': 'Mobility'},
+}
+
+
+def _class_sort_key(field: str, value: str):
+    """Deterministic ordering within a task's classes: SNR numeric, protocol by PROTOCOLS order."""
+    if field == 'snr':
+        return _snr_key(value)
+    if field == '__protocol__':
+        return PROTOCOLS.index(value) if value in PROTOCOLS else 1e9
+    return value
+
+
+def _build_labels(samples, protocol: np.ndarray, tasks: Dict = TASKS):
+    """Build integer label vectors + ordered class-name lists for every task in ``tasks``.
+
+    A task's class is the tuple of its fields' raw string values across the sample (e.g. the joint
+    ``snr_doppler`` class is (SNR, mobility)). Classes are sorted per-field for stable indices.
+    """
+    labels, names = {}, {}
+    for task, cfg in tasks.items():
+        fields = cfg['fields']
+        raw = []
+        for i in range(len(protocol)):
+            parts = tuple(PROTOCOLS[protocol[i]] if f == '__protocol__' else _field_str(samples[i], f)
+                          for f in fields)
+            raw.append(parts)
+        classes = sorted(set(raw),
+                         key=lambda t: tuple(_class_sort_key(f, v) for f, v in zip(fields, t)))
+        to_idx = {c: i for i, c in enumerate(classes)}
+        labels[task] = np.array([to_idx[r] for r in raw], dtype=np.int64)
+        names[task] = [' | '.join(c) for c in classes]
+    return labels, names
 
 
 def _field_str(sample, field) -> str:
@@ -69,13 +111,7 @@ def load_synthetic_data(out_dir: str, seed: int = 42) -> "SpectroData":
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
     protocol = np.array([proto_to_idx[_field_str(s, 'tech')] for s in samples], dtype=np.int64)
 
-    labels, label_names = {}, {}
-    for task, cfg in TASKS.items():
-        raw = [_field_str(s, cfg['field']) for s in samples]
-        classes = sorted(set(raw), key=lambda v: _snr_key(v) if task == 'snr' else v)
-        to_idx = {c: i for i, c in enumerate(classes)}
-        labels[task] = np.array([to_idx[r] for r in raw], dtype=np.int64)
-        label_names[task] = classes
+    labels, label_names = _build_labels(samples, protocol)
 
     train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed)
     return SpectroData(
@@ -113,14 +149,7 @@ def load_spectro_data(demo_path: str = _DEMO_PATH, seed: int = 42) -> SpectroDat
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
     protocol = np.array([proto_to_idx[_field_str(s, 'tech')] for s in samples], dtype=np.int64)
 
-    labels, label_names = {}, {}
-    for task, cfg in TASKS.items():
-        field = cfg['field']
-        raw = [_field_str(s, field) for s in samples]
-        classes = sorted(set(raw), key=lambda v: _snr_key(v) if task == 'snr' else v)
-        to_idx = {c: i for i, c in enumerate(classes)}
-        labels[task] = np.array([to_idx[r] for r in raw], dtype=np.int64)
-        label_names[task] = classes
+    labels, label_names = _build_labels(samples, protocol)
 
     moe = torch.stack([s['moe_embedding'].float() for s in samples])      # (N,128)
     tech = torch.stack([torch.as_tensor(s['tech_embedding']).float() for s in samples])
