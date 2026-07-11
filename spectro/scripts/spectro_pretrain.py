@@ -214,7 +214,7 @@ def train_router(specs: torch.Tensor, protocol: np.ndarray, *, epochs, lr, batch
     for ep in range(epochs):
         router.train()
         for xb, yb in tr_loader:
-            xb, yb = xb.to(device), yb.to(device)
+            xb, yb = xb.to(device).float(), yb.to(device)   # corpus may be float16 -> float32 for the CNN
             opt.zero_grad()
             loss = criterion(router(_normalize_per_sample(xb)), yb)
             loss.backward(); opt.step()
@@ -222,7 +222,7 @@ def train_router(specs: torch.Tensor, protocol: np.ndarray, *, epochs, lr, batch
         correct, total = 0, 0
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb = xb.to(device)
+                xb = xb.to(device).float()
                 pred = router(_normalize_per_sample(xb)).argmax(1).cpu()
                 correct += (pred == yb).sum().item(); total += yb.size(0)
         acc = correct / max(total, 1)

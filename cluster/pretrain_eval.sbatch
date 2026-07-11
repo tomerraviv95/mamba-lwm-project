@@ -2,7 +2,7 @@
 #SBATCH --job-name=lwm-pretrain-eval
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=64G
 #SBATCH --time=24:00:00
 #SBATCH --output=cluster/logs/pretrain_eval_%j.out
 # STEP 2 — pretrain ONE arch (paper reconstruction-only), publish the checkpoints to HF, then run the

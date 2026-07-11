@@ -115,11 +115,16 @@ def load_synthetic_data(out_dir: str, seed: int = 42) -> "SpectroData":
                 f"The download is likely incomplete — re-fetch with "
                 f"`FORCE=1 bash cluster/download_data.sh` (or hf_download_gridstft.py --force).") from e
 
-    specs = torch.stack([s['data'].squeeze(0).float() for s in samples])
+    # Keep the corpus in FLOAT16 (the source `data` is already float16) — a large corpus (132k x
+    # 2ch x 128x128) is ~17 GB in float32 but ~8.7 GB in float16, and downstream casts to float() per
+    # batch anyway. Then free the per-sample dict list (another ~corpus-sized chunk) so the pretrain
+    # host doesn't OOM. Costs a little accuracy in the z-score stats (negligible).
+    specs = torch.stack([s['data'].squeeze(0).to(torch.float16) for s in samples])
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
     protocol = np.array([proto_to_idx[_field_str(s, 'tech')] for s in samples], dtype=np.int64)
 
     labels, label_names = _build_labels(samples, protocol)
+    del samples                                         # release the raw dict list (~corpus-sized)
 
     train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed)
     return SpectroData(

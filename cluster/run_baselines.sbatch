@@ -2,7 +2,7 @@
 #SBATCH --job-name=lwm-baselines
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=cluster/logs/baselines_%j.out
 # STEP 3 — run the non-LWM baselines under the SAME paper downstream protocol (macro-F1, samples/class)
