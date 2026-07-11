@@ -13,9 +13,13 @@
 # Baselines (BASELINES env): deepcnn (end-to-end supervised), resnet18 (frozen ImageNet),
 # random_init (untrained MoE — the pretraining-lift floor), raw (mean-pooled patches).
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch COPIES this script to a spool dir, so ${BASH_SOURCE[0]} does NOT point at the repo. Slurm
+# sets SLURM_SUBMIT_DIR to where `sbatch` was launched (submit from the repo root); fall back to PWD.
+ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
+[ -f "$ROOT/cluster/config.env" ] || { echo "ERROR: submit from the repo root — cluster/config.env not found under $ROOT"; exit 1; }
+cd "$ROOT"
 # shellcheck disable=SC1091
-source "$HERE/config.env"
+source cluster/config.env
 cd "$REPO_ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1
