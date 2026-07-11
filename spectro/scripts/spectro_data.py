@@ -105,7 +105,15 @@ def load_synthetic_data(out_dir: str, seed: int = 42) -> "SpectroData":
         manifest = json.load(f)
     samples = []
     for shard in manifest['shards']:
-        samples.extend(torch.load(os.path.join(out_dir, shard), weights_only=False))
+        sp = os.path.join(out_dir, shard)
+        try:
+            samples.extend(torch.load(sp, weights_only=False))
+        except Exception as e:                       # truncated/empty shard from an interrupted download
+            sz = os.path.getsize(sp) if os.path.isfile(sp) else -1
+            raise RuntimeError(
+                f"failed to load shard {sp} ({sz} bytes): {type(e).__name__}: {e}. "
+                f"The download is likely incomplete — re-fetch with "
+                f"`FORCE=1 bash cluster/download_data.sh` (or hf_download_gridstft.py --force).") from e
 
     specs = torch.stack([s['data'].squeeze(0).float() for s in samples])
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
