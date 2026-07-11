@@ -319,7 +319,17 @@ def main():
             pick = np.random.RandomState(args.seed).permutation(n_full)[:args.max_per_expert]
             sel = sel[np.sort(pick)]
         specs = pre.spectrograms[torch.as_tensor(sel)]
-        mod, mob = pre.labels['modulation'][sel], pre.labels['mobility'][sel]
+        # modulation drives the in-training probe; mobility only feeds the (default-off) SupCon-mob head.
+        # 'mobility' is no longer a top-level task (folded into the joint snr_doppler), so fall back to a
+        # zero placeholder when absent — safe for the reconstruction-only default (w_cont=0).
+        mod = pre.labels['modulation'][sel]
+        _mob = pre.labels.get('mobility')
+        if _mob is None:
+            if args.w_cont > 0 or args.eval_task == 'mobility':
+                raise SystemExit("mobility labels needed (w_cont>0 or --eval-task mobility) but 'mobility' "
+                                 "is not a task in this corpus; add it to spectro_data.TASKS/EXTRA_TASKS.")
+            _mob = np.zeros(len(pre.labels['modulation']), dtype=np.int64)
+        mob = _mob[sel]
         print(f"\n[Expert {proto}] {specs.shape[0]} corpus spectrograms"
               + (f" (capped from {n_full} by --max-per-expert)" if args.max_per_expert and n_full > args.max_per_expert else ""))
         state, history, base = pretrain_expert_steps(specs, mod, mob, arch=args.arch, proto=proto,
