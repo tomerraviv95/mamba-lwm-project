@@ -7,11 +7,23 @@ copy for now; it can migrate to import from here in a later cleanup.
 import torch
 import torch.nn as nn
 
-# Import official Mamba SSM block
-try:
-    from mamba_ssm import Mamba as MambaSSM
-except ImportError:
-    raise ValueError("mamba_ssm not available. Install with: pip install mamba-ssm")
+
+def _get_mamba_ssm():
+    """Import the official Mamba SSM block LAZILY (only the Mamba backbone needs it).
+
+    Deferring the import keeps everything downstream importable when mamba-ssm isn't installed — so the
+    transformer arm and the non-Mamba baselines (DeepCNN / ResNet / raw / random_init-transformer) still
+    run even in an env missing mamba-ssm; only actually building a Mamba block raises, with a build hint.
+    """
+    try:
+        from mamba_ssm import Mamba
+    except ImportError as e:
+        raise ImportError(
+            "mamba_ssm is not installed (needed only for the Mamba backbone). Build it into the .venv as "
+            "in cluster/setup_env.sh: `uv pip install --python .venv/bin/python --no-build-isolation "
+            "mamba-ssm==2.3.0`. NOTE a bare `uv sync` REMOVES it (not in the lock) — use `uv sync --inexact`."
+        ) from e
+    return Mamba
 
 
 class MambaBlock(nn.Module):
@@ -45,6 +57,7 @@ class MambaBlock(nn.Module):
         # use_fast_path=False routes the SSM through nn.Module .forward / plain .weight access (the slow
         # path) so weight-parametrization LoRA on the SSM projections is exercised during downstream
         # finetuning. Pretraining leaves it True for the fused-kernel speed.
+        MambaSSM = _get_mamba_ssm()             # lazy: only building a Mamba block needs mamba-ssm
 
         if self.bidirectional:
             # Each direction gets half the dimension to maintain similar parameter count

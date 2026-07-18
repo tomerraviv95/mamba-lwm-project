@@ -37,6 +37,14 @@ for d in "$CORPUS_DIR" "$DOWNSTREAM_DIR"; do
   [ -f "$d/manifest.json" ] || { echo "MISSING $d/manifest.json — run cluster/download_data.sh on the login node." | tee -a "$LOG"; exit 1; }
 done
 
+# ---- env preflight: fail in seconds (not after the ~8GB corpus load) if a dep is missing ----
+if [ "$ARCH" = mamba ]; then
+  $PY -c "import mamba_ssm" 2>/dev/null || {
+    echo "ERROR: mamba_ssm not importable. Rebuild it: bash cluster/setup_env.sh (or uv pip install " \
+         "--python .venv/bin/python --no-build-isolation mamba-ssm==2.3.0). A bare 'uv sync' REMOVES it " \
+         "(not in the lock) — use 'uv sync --inexact'." | tee -a "$LOG"; exit 1; }
+fi
+
 done3() { [ "$(ls "$1" 2>/dev/null | grep -c expert.pth)" = 3 ] && [ -f "$1/router.pth" ]; }
 
 for PATCH in $PATCHES; do
