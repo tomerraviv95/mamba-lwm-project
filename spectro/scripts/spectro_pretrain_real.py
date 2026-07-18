@@ -22,6 +22,7 @@ import csv
 import itertools
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -40,6 +41,13 @@ from spectro_pretrain import weights_dir, train_router  # noqa: E402
 from sklearn.linear_model import LogisticRegression  # noqa: E402
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+
+
+def _fmt_dur(sec: float) -> str:
+    """Human-readable duration, e.g. '1h04m' or '7m12s'."""
+    sec = int(max(0, sec))
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
 @torch.no_grad()
@@ -174,6 +182,7 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     print(f"  [{proto}] step 0 (random-init) demo={base_acc:.4f} probe_train={base_tr:.4f} "
           f"probe_val={base_val:.4f}", flush=True)
     loader_iter = itertools.cycle(loader)
+    t_start = t_last_log = time.time()          # wall-clock for elapsed / it/s / ETA progress lines
     while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
         _train_mode()
         opt.zero_grad()
@@ -201,19 +210,35 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
         opt.step(); sched.step()
         step += 1
 
-        if step % args.eval_every == 0 or step == args.steps:
+        # lightweight progress heartbeat between the (expensive) eval rows, so a long inter-eval gap
+        # still shows elapsed / speed / ETA instead of going silent for thousands of steps.
+        now = time.time()
+        is_eval = (step % args.eval_every == 0 or step == args.steps)
+        if not is_eval and now - t_last_log >= args.log_every_sec:
+            el = now - t_start; its = step / el
+            print(f"  [{proto}] step {step}/{args.steps}  {its:.2f} it/s  "
+                  f"elapsed {_fmt_dur(el)}  ETA {_fmt_dur((args.steps - step) / its if its else 0)}", flush=True)
+            t_last_log = now
+
+        if is_eval:
             acc, probe_tr, probe_val, v_mlm = _probe()
             gap = (probe_tr - probe_val) if (probe_tr == probe_tr and probe_val == probe_val) else float('nan')
             row = {'step': step, 'mlm': mlm_v, 'val_mlm': v_mlm, 'sc_mod': sc_mod_v, 'sc_mob': sc_mob_v,
                    'demo_acc': acc, 'probe_train': probe_tr, 'probe_val': probe_val, 'probe_gap': gap,
                    'lr': opt.param_groups[0]['lr']}
             history.append(row)
+            el = now - t_start; its = step / el
             print(f"  [{proto}] step {step}/{args.steps}  mlm={mlm_v:.4f} val_mlm={v_mlm:.4f} "
                   f"sc_mod={sc_mod_v:.4f} sc_mob={sc_mob_v:.4f}  "
                   f"probe_{eval_task if eval_task != 'snr' else 'mod'}: train={probe_tr:.3f} "
-                  f"val={probe_val:.3f} gap={gap:+.3f}", flush=True)
+                  f"val={probe_val:.3f} gap={gap:+.3f}  "
+                  f"[{_fmt_dur(el)} elapsed, {its:.2f} it/s, ETA {_fmt_dur((args.steps - step) / its if its else 0)}]",
+                  flush=True)
+            t_last_log = now
             if wandb_run is not None:
                 wandb_run.log({f'{proto}/{k}': v for k, v in row.items() if k != 'step'} | {f'{proto}/step': step})
+    total = time.time() - t_start
+    print(f"  [{proto}] DONE {args.steps} steps in {_fmt_dur(total)} ({args.steps / total:.2f} it/s avg)", flush=True)
     state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     return state, history, base_acc
 
@@ -224,6 +249,9 @@ def main():
     ap.add_argument('--pretrain-dir', default=os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo_150k'))
     ap.add_argument('--steps', type=int, default=30000, help='optimizer steps per expert')
     ap.add_argument('--eval-every', type=int, default=2000, help='probe every N steps')
+    ap.add_argument('--log-every-sec', type=float, default=30.0,
+                    help='emit a lightweight progress heartbeat (elapsed / it-per-s / ETA) at least this '
+                         'often between the expensive eval rows, so a long inter-eval gap is not silent.')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
     ap.add_argument('--probe-heldout-frac', type=float, default=0.1,
                     help='fraction of each expert\'s corpus slice held out from MLM training for the '
