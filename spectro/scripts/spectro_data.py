@@ -93,12 +93,15 @@ class SpectroData:
         return len(self.label_names[task])
 
 
-def load_synthetic_data(out_dir: str, seed: int = 42) -> "SpectroData":
+def load_synthetic_data(out_dir: str, seed: int = 42, val_frac: float = 0.15,
+                        test_frac: float = 0.15) -> "SpectroData":
     """Load a synthetic corpus produced by ``spectro/datagen/generate.py``.
 
     Reads the shards listed in ``manifest.json`` into a ``SpectroData`` with the same task
     labels + protocol-stratified split, but **no precomputed embeddings** (those only exist for
-    the real demo data). Intended for pretraining the Mamba MoE on a larger corpus.
+    the real demo data). Intended for pretraining the Mamba MoE on a larger corpus. Downstream
+    finetuning passes ``val_frac=0.10, test_frac=0.20`` (a 70/10/20 split); the default 0.15/0.15
+    keeps the pretraining in-corpus probe unchanged.
     """
     import json
     with open(os.path.join(out_dir, 'manifest.json')) as f:
@@ -126,7 +129,8 @@ def load_synthetic_data(out_dir: str, seed: int = 42) -> "SpectroData":
     labels, label_names = _build_labels(samples, protocol)
     del samples                                         # release the raw dict list (~corpus-sized)
 
-    train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed)
+    train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed,
+                                                     val_frac=val_frac, test_frac=test_frac)
     return SpectroData(
         spectrograms=specs, protocol=protocol, labels=labels, label_names=label_names,
         moe_embedding=None, tech_embedding=None,
@@ -152,7 +156,8 @@ def _stratified_split(strata: np.ndarray, *, val_frac=0.15, test_frac=0.15, seed
             np.sort(np.array(test, dtype=np.int64)))
 
 
-def load_spectro_data(demo_path: str = _DEMO_PATH, seed: int = 42) -> SpectroData:
+def load_spectro_data(demo_path: str = _DEMO_PATH, seed: int = 42, val_frac: float = 0.15,
+                      test_frac: float = 0.15) -> SpectroData:
     """Load the demo dataset and build label vectors + a protocol-stratified split."""
     samples = torch.load(demo_path, weights_only=False)
     n = len(samples)
@@ -167,7 +172,8 @@ def load_spectro_data(demo_path: str = _DEMO_PATH, seed: int = 42) -> SpectroDat
     moe = torch.stack([s['moe_embedding'].float() for s in samples])      # (N,128)
     tech = torch.stack([torch.as_tensor(s['tech_embedding']).float() for s in samples])
 
-    train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed)
+    train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed,
+                                                     val_frac=val_frac, test_frac=test_frac)
 
     return SpectroData(
         spectrograms=specs, protocol=protocol, labels=labels, label_names=label_names,

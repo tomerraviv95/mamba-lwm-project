@@ -186,6 +186,9 @@ def main():
                          "sequence (cnn1d, default) or a pooled-feature MLP probe (mlp).")
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
                     help='routing strategy for the synthetic-pretrained MoE arms.')
+    ap.add_argument('--moe-arch', choices=['mamba', 'transformer'], default='mamba',
+                    help="architecture for the random_init MoE baseline (match the compared arm so the "
+                         "pretraining lift is measured against the SAME untrained architecture).")
     ap.add_argument('--baseline', choices=['moe', 'tech'], default='moe',
                     help='Transformer-baseline precomputed embedding to use.')
     ap.add_argument('--seed', type=int, default=42)
@@ -203,6 +206,8 @@ def main():
     ap.add_argument('--run-tag', default='',
                     help="extra suffix on the submission dir to disambiguate eval sets "
                          "(e.g. 'alluser15' vs 'heldoutcities' so two evals don't collide).")
+    ap.add_argument('--val-frac', type=float, default=0.10, help='val fraction (70/10/20 split).')
+    ap.add_argument('--test-frac', type=float, default=0.20, help='test fraction (70/10/20 split).')
     ap.add_argument('--epochs', type=int, default=None, help='override head epochs (e.g. for smoke)')
     ap.add_argument('--sample-counts', type=int, nargs='+', default=None,
                     help='absolute #training-samples to sweep (e.g. 50 100 250 500 1000 2500 4000). '
@@ -226,9 +231,10 @@ def main():
         if args.arm == 'transformer':
             raise SystemExit("--arm transformer (published baseline) needs precomputed demo embeddings; "
                              "it cannot run on a synthetic --synth-dir. Use transformer_synth/mamba/random_init/raw.")
-        data = load_synthetic_data(args.synth_dir, seed=args.seed)
+        data = load_synthetic_data(args.synth_dir, seed=args.seed,
+                                   val_frac=args.val_frac, test_frac=args.test_frac)
     else:
-        data = load_spectro_data(seed=args.seed)
+        data = load_spectro_data(seed=args.seed, val_frac=args.val_frac, test_frac=args.test_frac)
 
     print(f"Extracting features for arm={args.arm} patch={args.patch} pool={args.pool} head={args.head} "
           f"eval={'synth:'+os.path.basename(args.synth_dir.rstrip('/')) if args.synth_dir else 'demo'} ...")
@@ -246,7 +252,7 @@ def main():
         backbone_factory = lambda: DeepCNN(in_channels=channels)   # noqa: E731
         embed_fn = lambda bb, x: bb(x)                             # noqa: E731
     elif args.arm == 'random_init':
-        features = _random_init_features(data, device, arch='transformer', seed=args.seed,
+        features = _random_init_features(data, device, arch=args.moe_arch, seed=args.seed,
                                          patch=args.patch, pool=args.pool, as_sequence=seq)
     elif args.arm in _MOE_ARMS:
         arch = _MOE_ARMS[args.arm]

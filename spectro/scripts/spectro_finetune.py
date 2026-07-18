@@ -1,20 +1,21 @@
-"""LWM FT — the paper's downstream FINE-TUNING of a pretrained spectro MoE (eq. 22).
+"""LWM FT — LoRA fine-tuning of a pretrained spectro MoE on the downstream task.
 
-Unlike ``spectro_train_heads.py`` (frozen encoder -> head), this unfreezes the routed expert backbones
-and trains them end-to-end together with the paper's residual 1-D CNN head, under the joint objective
+Unlike ``spectro_train_heads.py`` (frozen encoder -> head), this adapts the routed expert backbones with
+LoRA (adapter params capped at ``--lora-budget`` of the backbone; the head is trainable on top) and trains
+them together with the residual 1-D CNN head under the joint objective
 
     L = CE(head)  +  w_recon * L_recon(MLM)  +  w_cont * L_cont(SupCon on the task label)
 
-(paper: lambda_recon=1.0, lambda_cont=0.3, tau=0.2). The backbone gets a small lr, the head a normal
-one; early-stops on validation macro-F1. Oracle routing (known protocol per sample). To stay directly
-comparable to the frozen "LWM" rows, it sweeps the SAME per-class few-shot axis and seeds, reports
-macro-F1 (primary) + accuracy, and writes ``aggregated_results.json`` in the sweep schema so the FT
-curves drop onto the same plots. Loads ``spectro_{arch}_p{patch}_{suffix}_weights``.
+LoRA is applied as a WEIGHT parametrization (``shared/lora.py``) so it also adapts the Mamba SSM
+projections that the fused kernel reads via raw ``.weight`` (the finetune Mamba is built with
+``use_fast_path=False``). Data uses a 70/10/20 train/val/test split; the few-shot axis is TOTAL train
+samples drawn from the 70% pool; early-stops on validation macro-F1; oracle routing. Reports macro-F1
+(primary) + accuracy in the sweep schema. Loads ``spectro_{arch}_p{patch}_{suffix}_weights``.
 
 Example (all-user in-distribution, mamba, patch 4):
     CUDA_VISIBLE_DEVICES=0 python spectro/scripts/spectro_finetune.py --arch mamba --patch 4 \
-        --weights-suffix alluser --synth-dir spectro/outputs/spectro_eval_alluser15_gridstft \
-        --per-class-counts 2 4 8 16 32 64 128 256 --seeds 42 43 44
+        --weights-suffix alluser_b128 --synth-dir spectro/outputs/spectro_eval_alluser15_gridstft \
+        --sample-counts 50 100 200 400 600 --seeds 42 43 44 --lora-budget 0.05
 """
 from __future__ import annotations
 import argparse, copy, json, os, sys
@@ -24,6 +25,7 @@ import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'datagen'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from spectro_data import PROTOCOLS, TASKS, load_synthetic_data, load_spectro_data  # noqa: E402
 from spectro_moe import SpectroMoE  # noqa: E402
 from spectro_patchify import spectrogram_patchify, patch_geometry, build_masked_tensors  # noqa: E402
@@ -31,6 +33,8 @@ from spectro_train_heads_config import Conv1dHead  # noqa: E402
 from spectro_sweep import _macro_f1, _accuracy, _subsample_per_class, _subsample_count  # noqa: E402
 from spectro_pretrain import weights_dir  # noqa: E402
 from contrastive import ProjectionHead, supervised_contrastive_loss  # noqa: E402
+from shared.lora import (TARGETS, apply_lora, pick_rank, backbone_param_count,  # noqa: E402
+                         lora_params_at_rank, trainable_param_count)
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
@@ -44,8 +48,11 @@ def _load_moe(arch, patch, suffix, device):
     element_length = sample.get('element_length', patch * patch)
     max_len = sample.get('max_len', patch_geometry(patch)['max_len'])
     in_ch = max(1, element_length // (patch * patch))
+    # use_fast_path=False forces the Mamba SSM slow path so weight-parametrization LoRA on its
+    # projections is exercised during finetuning (harmless / ignored for the transformer).
     moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool='seq', patch=patch,
-                     element_length=element_length, max_len=max_len, in_channels=in_ch)
+                     element_length=element_length, max_len=max_len, in_channels=in_ch,
+                     use_fast_path=False)
     for p in PROTOCOLS:
         moe.load_expert(p, torch.load(os.path.join(wdir, f'{p}_expert.pth'),
                                       map_location='cpu', weights_only=False)['state_dict'])
@@ -81,8 +88,10 @@ def _routed(moe, ids, proto, device, masked_pos=None):
 def _finetune_once(moe0, head, proj, ids_all, specs, proto, y, tr, va, te, args, device):
     """One FT run from the pretrained state: returns (test_f1, test_acc). Mutates fresh head/proj/moe."""
     moe = moe0                                     # already reloaded to pretrained state by caller
+    # backbone group = ONLY the trainable LoRA adapter params (base weights are frozen); head+proj full.
+    lora_params = [p for e in moe.experts.values() for p in e.parameters() if p.requires_grad]
     opt = torch.optim.AdamW([
-        {'params': [p for e in moe.experts.values() for p in e.parameters()], 'lr': args.lr_backbone},
+        {'params': lora_params, 'lr': args.lr_backbone},
         {'params': list(head.parameters()) + list(proj.parameters()), 'lr': args.lr_head},
     ], weight_decay=args.weight_decay)
     ce = nn.CrossEntropyLoss()
@@ -144,9 +153,21 @@ def main():
                     help="in-domain eval corpus (train/val/test split); omit to use the demo set")
     ap.add_argument('--tasks', nargs='+', default=list(TASKS.keys()))
     ap.add_argument('--per-class-counts', type=int, nargs='+', default=None,
-                    help="few-shot axis: #train samples PER CLASS (paper). Overrides --sample-counts.")
-    ap.add_argument('--sample-counts', type=int, nargs='+', default=None)
-    ap.add_argument('--seeds', type=int, nargs='+', default=[42])
+                    help="few-shot axis: #train samples PER CLASS. Overrides --sample-counts.")
+    ap.add_argument('--sample-counts', type=int, nargs='+', default=None,
+                    help="few-shot axis: TOTAL #train samples drawn from the 70%% train pool "
+                         "(default 50 100 200 400 600).")
+    ap.add_argument('--seeds', type=int, nargs='+', default=[42, 43, 44])
+    ap.add_argument('--val-frac', type=float, default=0.10, help='downstream val fraction (70/10/20 split).')
+    ap.add_argument('--test-frac', type=float, default=0.20, help='downstream test fraction (70/10/20 split).')
+    ap.add_argument('--lora-budget', type=float, default=0.05,
+                    help='cap LoRA ADAPTER params at this fraction of the backbone (head is trainable, '
+                         'not counted). The rank is auto-picked to fit unless --lora-rank is given.')
+    ap.add_argument('--lora-rank', type=int, default=None,
+                    help='override the LoRA rank (else auto-picked from --lora-budget).')
+    ap.add_argument('--lora-alpha', type=float, default=None,
+                    help='LoRA scaling alpha (default = rank, i.e. scaling 1.0).')
+    ap.add_argument('--lora-max-rank', type=int, default=16, help='cap for the auto-picked rank.')
     ap.add_argument('--epochs', type=int, default=30)
     ap.add_argument('--patience', type=int, default=8)
     ap.add_argument('--batch-size', type=int, default=16)
@@ -165,9 +186,24 @@ def main():
     args = ap.parse_args()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    data = (load_synthetic_data(args.synth_dir, seed=args.seed) if args.synth_dir
-            else load_spectro_data(seed=args.seed))
+    data = (load_synthetic_data(args.synth_dir, seed=args.seed,
+                                val_frac=args.val_frac, test_frac=args.test_frac) if args.synth_dir
+            else load_spectro_data(seed=args.seed, val_frac=args.val_frac, test_frac=args.test_frac))
     moe, d_model, _ = _load_moe(args.arch, args.patch, args.weights_suffix, device)
+
+    # --- LoRA: freeze the backbone, adapt only <=lora-budget of its params (head stays trainable) ---
+    rules = TARGETS[args.arch]
+    one_expert = next(iter(moe.experts.values()))
+    bb = backbone_param_count(one_expert)
+    rank = args.lora_rank or pick_rank(one_expert, rules, budget_frac=args.lora_budget,
+                                       max_rank=args.lora_max_rank)
+    for e in moe.experts.values():
+        apply_lora(e, rules, rank, alpha=args.lora_alpha)
+    adapter = lora_params_at_rank(one_expert, rules, rank)   # counted on the raw target linears
+    print(f"LoRA: arch={args.arch} rank={rank}  adapter={adapter:,}/{bb:,} params "
+          f"= {adapter / bb:.2%} of backbone (budget {args.lora_budget:.0%}); head trainable on top")
+    # capture the reset point AFTER wrapping (adapters start as a no-op: B=0), so per-run
+    # `moe.load_state_dict(pretrained_state)` restores pretrained backbone + fresh (no-op) adapters.
     pretrained_state = copy.deepcopy(moe.state_dict())
     ids_all = _input_ids(data.spectrograms, args.patch, device)
     specs = data.spectrograms if torch.is_tensor(data.spectrograms) else torch.as_tensor(np.asarray(data.spectrograms))
@@ -179,7 +215,7 @@ def main():
     elif args.sample_counts is not None:
         mode, x_points = 'counts', list(args.sample_counts)
     else:
-        mode, x_points = 'per_class', [2, 4, 8, 16, 32, 64, 128, 256]
+        mode, x_points = 'counts', [50, 100, 200, 400, 600]
 
     arm = ('transformer_synth' if args.arch == 'transformer' else 'mamba') + '_ft'
     print(f"LWM-FT {arm} p{args.patch} [{args.weights_suffix}] tasks={args.tasks} mode={mode} "
@@ -220,10 +256,13 @@ def main():
 
     aggregated = {
         'experiment_config': {
-            'arm': arm, 'tasks': args.tasks, 'feature_dim': 'e2e-ft', 'seeds': args.seeds,
-            'metric': 'macro_f1 (primary) + accuracy', 'head': 'conv1d_ft',
+            'arm': arm, 'tasks': args.tasks, 'feature_dim': 'lora-ft', 'seeds': args.seeds,
+            'metric': 'macro_f1 (primary) + accuracy', 'head': 'conv1d_lora_ft',
             'lambda_recon': args.w_recon, 'lambda_cont': args.w_cont, 'temperature': args.temperature,
             'lr_backbone': args.lr_backbone, 'lr_head': args.lr_head,
+            'lora_rank': rank, 'lora_budget': args.lora_budget,
+            'lora_adapter_frac': adapter / bb, 'split': f'{int((1-args.val_frac-args.test_frac)*100)}/'
+                                                          f'{int(args.val_frac*100)}/{int(args.test_frac*100)}',
             'x_axis': 'per_class_counts' if mode == 'per_class' else 'sample_counts',
             'per_class_counts': x_points if mode == 'per_class' else None,
             'sample_counts': x_points if mode == 'counts' else None,

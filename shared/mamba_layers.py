@@ -33,7 +33,8 @@ class MambaBlock(nn.Module):
         dropout (float): Dropout rate
         bidirectional (bool): Whether to use bidirectional processing (default: True)
     """
-    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True,
+                 use_fast_path=True):
         super().__init__()
         self.d_model = d_model
         self.d_state = d_state
@@ -41,6 +42,9 @@ class MambaBlock(nn.Module):
         self.expand = expand
         self.dropout_p = dropout
         self.bidirectional = bidirectional
+        # use_fast_path=False routes the SSM through nn.Module .forward / plain .weight access (the slow
+        # path) so weight-parametrization LoRA on the SSM projections is exercised during downstream
+        # finetuning. Pretraining leaves it True for the fused-kernel speed.
 
         if self.bidirectional:
             # Each direction gets half the dimension to maintain similar parameter count
@@ -55,6 +59,7 @@ class MambaBlock(nn.Module):
                 d_state=d_state,
                 d_conv=d_conv,
                 expand=expand,
+                use_fast_path=use_fast_path,
             )
 
             # Backward Mamba (processes sequence right-to-left)
@@ -63,6 +68,7 @@ class MambaBlock(nn.Module):
                 d_state=d_state,
                 d_conv=d_conv,
                 expand=expand,
+                use_fast_path=use_fast_path,
             )
 
             # Output projection to combine forward and backward
@@ -74,6 +80,7 @@ class MambaBlock(nn.Module):
                 d_state=d_state,
                 d_conv=d_conv,
                 expand=expand,
+                use_fast_path=use_fast_path,
             )
 
         # Normalization and dropout
@@ -128,9 +135,11 @@ class MambaLayer(nn.Module):
         dropout (float): Dropout rate
         bidirectional (bool): Whether to use bidirectional Mamba
     """
-    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, d_ff=512, dropout=0.1, bidirectional=True):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, d_ff=512, dropout=0.1, bidirectional=True,
+                 use_fast_path=True):
         super().__init__()
-        self.mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout, bidirectional)
+        self.mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout, bidirectional,
+                                use_fast_path=use_fast_path)
 
         # Feedforward network
         self.ffn = nn.Sequential(

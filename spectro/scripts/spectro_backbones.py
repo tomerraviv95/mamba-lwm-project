@@ -27,6 +27,24 @@ ARCHS = ('mamba', 'transformer')
 _hf_lwm_cls = None
 
 
+def _patch_hf_attention_sdpa(mod):
+    """Swap the HF LWM's manual softmax attention for memory-efficient SDPA (in place, at import time).
+
+    The vendored ``spectro/hf_cache`` is gitignored and re-downloaded per environment as the ORIGINAL
+    source, whose ``ScaledDotProductAttention`` materializes the full (B, heads, seq, seq) scores tensor
+    (~4 GB/layer at batch 128, seq 1025 -> OOMs a 24 GB GPU). SDPA is numerically equivalent (default
+    scale 1/sqrt(d_k)) but O(seq) memory, which is what lets both backbones pretrain at batch 128. We
+    patch here — in tracked code — so the optimization travels with the repo instead of a gitignored edit.
+    The returned attention weights are unused downstream, so we return None.
+    """
+    sdpa = getattr(nn.functional, 'scaled_dot_product_attention', None)
+    if sdpa is None or not hasattr(mod, 'ScaledDotProductAttention'):
+        return
+    def forward(self, Q, K, V):
+        return sdpa(Q, K, V), None
+    mod.ScaledDotProductAttention.forward = forward
+
+
 def _load_hf_lwm():
     """Import the HF Transformer ``LWM`` class from the downloaded source (cached)."""
     global _hf_lwm_cls
@@ -38,6 +56,7 @@ def _load_hf_lwm():
         spec = importlib.util.spec_from_file_location('hf_spectro_pretrained_model', _HF_LWM_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        _patch_hf_attention_sdpa(mod)         # memory-efficient attention so batch-128 fits on 24GB
         _hf_lwm_cls = mod.LWM
     return _hf_lwm_cls
 
@@ -91,14 +110,16 @@ def pool_tokens(output: 'torch.Tensor', pool: str = "mean") -> 'torch.Tensor':
 
 
 def build_expert(arch: str, *, d_model=128, n_layers=12, element_length=16, max_len=1025,
-                 n_heads=8, dropout=0.1):
+                 n_heads=8, dropout=0.1, use_fast_path=True):
     """Construct one per-protocol expert of the requested architecture.
 
-    ``n_heads`` is used only by the Transformer; the Mamba ignores it.
+    ``n_heads`` is used only by the Transformer; ``use_fast_path`` only by the Mamba (set False for
+    downstream LoRA finetuning so the SSM slow path exposes its projection weights to LoRA).
     """
     if arch == 'mamba':
         return lwm_mamba_spectro(element_length=element_length, d_model=d_model,
-                                 n_layers=n_layers, max_len=max_len, dropout=dropout)
+                                 n_layers=n_layers, max_len=max_len, dropout=dropout,
+                                 use_fast_path=use_fast_path)
     if arch == 'transformer':
         return TransformerExpert(element_length=element_length, d_model=d_model,
                                  n_layers=n_layers, max_len=max_len, n_heads=n_heads,

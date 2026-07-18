@@ -37,7 +37,7 @@ class lwm_mamba_spectro(nn.Module):
     """
 
     def __init__(self, element_length=16, d_model=128, n_layers=12, max_len=1025,
-                 d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True):
+                 d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True, use_fast_path=True):
         super().__init__()
         self.element_length = element_length
         self.d_model = d_model
@@ -48,9 +48,12 @@ class lwm_mamba_spectro(nn.Module):
         self.proj = nn.Linear(element_length, d_model)
         self.input_norm = nn.LayerNorm(d_model)
 
+        # use_fast_path=False (downstream LoRA finetuning) forces the SSM slow path so weight-
+        # parametrization LoRA on the SSM projections is applied; pretraining keeps True for speed.
         self.layers = nn.ModuleList([
             MambaLayer(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand,
-                       d_ff=d_model * 4, dropout=dropout, bidirectional=bidirectional)
+                       d_ff=d_model * 4, dropout=dropout, bidirectional=bidirectional,
+                       use_fast_path=use_fast_path)
             for _ in range(n_layers)
         ])
 
