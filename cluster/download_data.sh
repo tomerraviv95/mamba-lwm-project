@@ -62,6 +62,26 @@ verify_dir "$EVAL_INDIST_DIR" || fetch "$HF_CORPUS_REPO" eval "$CORPUS_DIR" "$EV
 # held-out-cities eval only (skip that repo's large corpus)
 fetch "$HF_GRIDSTFT_REPO" eval "$CORPUS_DIR" "$EVAL_XENV_DIR" "$EVAL_XENV_DIR"
 
+# Pre-cache ImageNet weights for any frozen-vision baselines in BASELINES. torchvision downloads these
+# from the internet on first use, which the COMPUTE nodes lack -> do it here (login node) so the cached
+# checkpoint (~/.cache/torch/hub/checkpoints, shared home) is found at job time. Best-effort/non-fatal.
+IMAGENET_ARMS="resnet18 resnet50 efficientnet_b0 mobilenet_v3_small"
+want=""
+for a in ${BASELINES:-}; do case " $IMAGENET_ARMS " in *" $a "*) want="$want $a";; esac; done
+if [ -n "$want" ]; then
+  echo "--- pre-caching ImageNet weights for:$want ---"
+  # shellcheck disable=SC2086
+  $PY - $want <<'PY' || echo "  WARN: ImageNet weight pre-cache failed (is torchvision synced? run: uv sync --inexact)"
+import sys, torchvision.models as M
+reg = {'resnet18': (M.resnet18, M.ResNet18_Weights.IMAGENET1K_V1),
+       'resnet50': (M.resnet50, M.ResNet50_Weights.IMAGENET1K_V1),
+       'efficientnet_b0': (M.efficientnet_b0, M.EfficientNet_B0_Weights.IMAGENET1K_V1),
+       'mobilenet_v3_small': (M.mobilenet_v3_small, M.MobileNet_V3_Small_Weights.IMAGENET1K_V1)}
+for a in sys.argv[1:]:
+    ctor, w = reg[a]; ctor(weights=w); print(f"  cached {a}")
+PY
+fi
+
 echo "--- final verification ---"
 ok=1
 for d in "$CORPUS_DIR" "$EVAL_INDIST_DIR" "$EVAL_XENV_DIR"; do

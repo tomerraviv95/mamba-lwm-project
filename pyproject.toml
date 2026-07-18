@@ -10,6 +10,7 @@ requires-python = ">=3.11,<3.13"
 # build deps (setuptools/wheel/ninja/packaging) already present in the synced env.
 dependencies = [
     "torch==2.10.0",
+    "torchvision==0.25.0",              # frozen ImageNet baselines (resnet18/…) in spectro_train_heads
     "sionna>=2.0",
     "numpy>=2.0",
     "scipy>=1.13",
@@ -33,6 +34,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [tool.setuptools]
 # This repo is a collection of scripts, not an importable package; don't auto-discover packages.
