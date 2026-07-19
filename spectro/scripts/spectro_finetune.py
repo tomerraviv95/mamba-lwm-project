@@ -40,7 +40,7 @@ _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'
 _SUBMISSIONS = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'submissions')
 
 
-def _load_moe(arch, patch, suffix, device):
+def _load_moe(arch, patch, suffix, device, use_fast_path=False):
     wdir = weights_dir(arch, patch, suffix)
     router_ckpt = torch.load(os.path.join(wdir, 'router.pth'), map_location='cpu', weights_only=False)
     sample = torch.load(os.path.join(wdir, f'{PROTOCOLS[0]}_expert.pth'), map_location='cpu', weights_only=False)
@@ -48,16 +48,35 @@ def _load_moe(arch, patch, suffix, device):
     element_length = sample.get('element_length', patch * patch)
     max_len = sample.get('max_len', patch_geometry(patch)['max_len'])
     in_ch = max(1, element_length // (patch * patch))
-    # use_fast_path=False forces the Mamba SSM slow path so weight-parametrization LoRA on its
-    # projections is exercised during finetuning (harmless / ignored for the transformer).
+    # LoRA mode needs use_fast_path=False (slow path exposes the Mamba SSM weights to the weight-
+    # parametrization). Partial finetuning trains real weights, so the fused fast path is fine.
     moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool='seq', patch=patch,
                      element_length=element_length, max_len=max_len, in_channels=in_ch,
-                     use_fast_path=False)
+                     use_fast_path=use_fast_path)
     for p in PROTOCOLS:
         moe.load_expert(p, torch.load(os.path.join(wdir, f'{p}_expert.pth'),
                                       map_location='cpu', weights_only=False)['state_dict'])
     moe.router.load_state_dict(router_ckpt['state_dict'])
     return moe.to(device), d_model, patch
+
+
+def _unfreeze_last_layers(expert, n) -> int:
+    """Freeze the expert, then unfreeze the last ``n`` backbone blocks (partial finetuning, à la the
+    channel-pipeline ``FineTuningWrapper``'s named-layer unfreeze — NOT LoRA). Both backbones store their
+    block stack as ``.layers`` (the transformer under ``.net.layers``). Returns #trainable backbone params.
+    """
+    for p in expert.parameters():
+        p.requires_grad_(False)
+    stack = getattr(expert, 'layers', None) or getattr(getattr(expert, 'net', None), 'layers', None)
+    if stack is None:                                   # unknown structure -> unfreeze all (safe fallback)
+        for p in expert.parameters():
+            p.requires_grad_(True)
+    else:
+        n = max(0, min(n, len(stack)))
+        for blk in list(stack)[len(stack) - n:]:
+            for p in blk.parameters():
+                p.requires_grad_(True)
+    return sum(p.numel() for p in expert.parameters() if p.requires_grad)
 
 
 def _input_ids(specs, patch, device):
@@ -168,6 +187,12 @@ def main():
     ap.add_argument('--lora-alpha', type=float, default=None,
                     help='LoRA scaling alpha (default = rank, i.e. scaling 1.0).')
     ap.add_argument('--lora-max-rank', type=int, default=16, help='cap for the auto-picked rank.')
+    ap.add_argument('--tune-mode', choices=['partial', 'lora'], default='partial',
+                    help="how to adapt the backbone: 'partial' unfreezes the last --tune-last-n blocks "
+                         "(CE fine-tuning of part of the network, like scripts/train_heads.py); 'lora' uses "
+                         "the ≤--lora-budget weight-parametrization adapters.")
+    ap.add_argument('--tune-last-n', type=int, default=2,
+                    help="partial mode: number of top backbone blocks to unfreeze (of n_layers).")
     ap.add_argument('--epochs', type=int, default=30)
     ap.add_argument('--patience', type=int, default=8)
     ap.add_argument('--batch-size', type=int, default=16)
@@ -175,8 +200,11 @@ def main():
     ap.add_argument('--lr-head', type=float, default=1e-3)
     ap.add_argument('--lr-backbone', type=float, default=2e-4)
     ap.add_argument('--weight-decay', type=float, default=0.05)
-    ap.add_argument('--w-recon', type=float, default=1.0, help='lambda_recon (MLM) during fine-tuning.')
-    ap.add_argument('--w-cont', type=float, default=0.3, help='lambda_cont (SupCon) during fine-tuning.')
+    ap.add_argument('--w-recon', type=float, default=0.0,
+                    help='lambda_recon (MLM aux loss) during fine-tuning. Default 0 = CE only (set 1.0 for '
+                         'the paper eq.22 joint loss).')
+    ap.add_argument('--w-cont', type=float, default=0.0,
+                    help='lambda_cont (SupCon aux loss) during fine-tuning. Default 0 = CE only (set 0.3 for paper).')
     ap.add_argument('--temperature', type=float, default=0.2)
     ap.add_argument('--mask-percent', type=float, default=0.7)
     ap.add_argument('--proj-pool', choices=['mean', 'cls', 'meanstd_t'], default='mean')
@@ -189,21 +217,33 @@ def main():
     data = (load_synthetic_data(args.synth_dir, seed=args.seed,
                                 val_frac=args.val_frac, test_frac=args.test_frac) if args.synth_dir
             else load_spectro_data(seed=args.seed, val_frac=args.val_frac, test_frac=args.test_frac))
-    moe, d_model, _ = _load_moe(args.arch, args.patch, args.weights_suffix, device)
+    # partial finetuning trains real weights (fused fast path OK); LoRA needs the slow path.
+    moe, d_model, _ = _load_moe(args.arch, args.patch, args.weights_suffix, device,
+                                use_fast_path=(args.tune_mode != 'lora'))
 
-    # --- LoRA: freeze the backbone, adapt only <=lora-budget of its params (head stays trainable) ---
-    rules = TARGETS[args.arch]
+    # --- adapt the backbone: partial (unfreeze top blocks, CE) or LoRA (<=budget adapters) ---
     one_expert = next(iter(moe.experts.values()))
     bb = backbone_param_count(one_expert)
-    rank = args.lora_rank or pick_rank(one_expert, rules, budget_frac=args.lora_budget,
-                                       max_rank=args.lora_max_rank)
-    for e in moe.experts.values():
-        apply_lora(e, rules, rank, alpha=args.lora_alpha)
-    adapter = lora_params_at_rank(one_expert, rules, rank)   # counted on the raw target linears
-    print(f"LoRA: arch={args.arch} rank={rank}  adapter={adapter:,}/{bb:,} params "
-          f"= {adapter / bb:.2%} of backbone (budget {args.lora_budget:.0%}); head trainable on top")
-    # capture the reset point AFTER wrapping (adapters start as a no-op: B=0), so per-run
-    # `moe.load_state_dict(pretrained_state)` restores pretrained backbone + fresh (no-op) adapters.
+    rank_meta = None
+    if args.tune_mode == 'lora':
+        rules = TARGETS[args.arch]
+        rank_meta = args.lora_rank or pick_rank(one_expert, rules, budget_frac=args.lora_budget,
+                                                max_rank=args.lora_max_rank)
+        for e in moe.experts.values():
+            apply_lora(e, rules, rank_meta, alpha=args.lora_alpha)
+        tunable = lora_params_at_rank(one_expert, rules, rank_meta)
+        how = f"LoRA rank={rank_meta} adapters"
+    else:  # partial: unfreeze the last N backbone blocks on every expert
+        for e in moe.experts.values():
+            _unfreeze_last_layers(e, args.tune_last_n)
+        tunable = trainable_param_count(one_expert)
+        how = f"partial FT last {args.tune_last_n} blocks"
+    aux = ''.join(([f' +{args.w_recon}*MLM'] if args.w_recon > 0 else [])
+                  + ([f' +{args.w_cont}*SupCon'] if args.w_cont > 0 else []))
+    print(f"FT[{args.tune_mode}] arch={args.arch}: {how} = {tunable:,}/{bb:,} = {tunable / bb:.2%} of "
+          f"backbone trainable; head trainable on top; loss=CE{aux or ' only'}")
+    # capture the reset point AFTER freeze/wrap so per-run `moe.load_state_dict(pretrained_state)` restores
+    # the pretrained backbone (LoRA adapters start as a no-op: B=0; the requires_grad config persists).
     pretrained_state = copy.deepcopy(moe.state_dict())
     ids_all = _input_ids(data.spectrograms, args.patch, device)
     specs = data.spectrograms if torch.is_tensor(data.spectrograms) else torch.as_tensor(np.asarray(data.spectrograms))
@@ -256,13 +296,14 @@ def main():
 
     aggregated = {
         'experiment_config': {
-            'arm': arm, 'tasks': args.tasks, 'feature_dim': 'lora-ft', 'seeds': args.seeds,
-            'metric': 'macro_f1 (primary) + accuracy', 'head': 'conv1d_lora_ft',
+            'arm': arm, 'tasks': args.tasks, 'feature_dim': f'{args.tune_mode}-ft', 'seeds': args.seeds,
+            'metric': 'macro_f1 (primary) + accuracy', 'head': f'conv1d_{args.tune_mode}_ft',
+            'tune_mode': args.tune_mode, 'tune_last_n': args.tune_last_n, 'lora_rank': rank_meta,
+            'trainable_backbone_frac': tunable / bb,
             'lambda_recon': args.w_recon, 'lambda_cont': args.w_cont, 'temperature': args.temperature,
             'lr_backbone': args.lr_backbone, 'lr_head': args.lr_head,
-            'lora_rank': rank, 'lora_budget': args.lora_budget,
-            'lora_adapter_frac': adapter / bb, 'split': f'{int((1-args.val_frac-args.test_frac)*100)}/'
-                                                          f'{int(args.val_frac*100)}/{int(args.test_frac*100)}',
+            'split': f'{int((1-args.val_frac-args.test_frac)*100)}/'
+                     f'{int(args.val_frac*100)}/{int(args.test_frac*100)}',
             'x_axis': 'per_class_counts' if mode == 'per_class' else 'sample_counts',
             'per_class_counts': x_points if mode == 'per_class' else None,
             'sample_counts': x_points if mode == 'counts' else None,

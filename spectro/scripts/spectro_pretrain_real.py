@@ -183,6 +183,16 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
           f"probe_val={base_val:.4f}", flush=True)
     loader_iter = itertools.cycle(loader)
     t_start = t_last_log = time.time()          # wall-clock for elapsed / it/s / ETA progress lines
+    # early stopping on the DOWNSTREAM-relevant probe (probe_val, maximize) — val_mlm plateaus far
+    # earlier than the downstream signal, so stopping on it would cut training short. Keep the BEST
+    # checkpoint, not the last. patience is counted in eval intervals.
+    best_metric, best_state, es_ctr = None, None, 0
+    def _better(m):
+        if m != m:
+            return False
+        if best_metric is None:
+            return True
+        return (m < best_metric - 1e-4) if args.early_stop_metric == 'val_mlm' else (m > best_metric + 1e-4)
     while step < args.steps:                    # `step` counts OPTIMIZER steps (apples-to-apples w/ batch=accum*micro)
         _train_mode()
         opt.zero_grad()
@@ -237,9 +247,22 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
             t_last_log = now
             if wandb_run is not None:
                 wandb_run.log({f'{proto}/{k}': v for k, v in row.items() if k != 'step'} | {f'{proto}/step': step})
+            if args.early_stop_patience > 0:
+                m = v_mlm if args.early_stop_metric == 'val_mlm' else probe_val
+                if _better(m):
+                    best_metric, es_ctr = m, 0
+                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                elif m == m:                      # count only evals where the metric is defined
+                    es_ctr += 1
+                    if es_ctr >= args.early_stop_patience:
+                        print(f"  [{proto}] EARLY STOP @ step {step}: no {args.early_stop_metric} gain for "
+                              f"{es_ctr} evals (best={best_metric:.4f})", flush=True)
+                        break
     total = time.time() - t_start
-    print(f"  [{proto}] DONE {args.steps} steps in {_fmt_dur(total)} ({args.steps / total:.2f} it/s avg)", flush=True)
-    state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    used_best = args.early_stop_patience > 0 and best_state is not None
+    print(f"  [{proto}] DONE {step} steps in {_fmt_dur(total)} ({step / max(total,1e-9):.2f} it/s avg)"
+          + (f"  [saved BEST {args.early_stop_metric}={best_metric:.4f}]" if used_best else ""), flush=True)
+    state = best_state if used_best else {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     return state, history, base_acc
 
 
@@ -253,6 +276,13 @@ def main():
                     help='emit a lightweight progress heartbeat (elapsed / it-per-s / ETA) at least this '
                          'often between the expensive eval rows, so a long inter-eval gap is not silent.')
     ap.add_argument('--eval-task', default='modulation', choices=['modulation', 'snr', 'mobility'])
+    ap.add_argument('--early-stop-patience', type=int, default=0,
+                    help="stop pretraining a expert after this many eval intervals with no improvement in "
+                         "the early-stop metric, and SAVE THE BEST checkpoint (not the last). 0 = off (run "
+                         "all --steps). Lets --steps be a generous cap (e.g. 20000) that convergence cuts short.")
+    ap.add_argument('--early-stop-metric', default='probe_val', choices=['probe_val', 'val_mlm'],
+                    help="metric for early stopping: 'probe_val' (in-corpus downstream probe, MAXIMIZE — the "
+                         "signal that actually under-converges) or 'val_mlm' (reconstruction, MINIMIZE).")
     ap.add_argument('--probe-heldout-frac', type=float, default=0.1,
                     help='fraction of each expert\'s corpus slice held out from MLM training for the '
                          'in-corpus train/val downstream probe + val-MLM loss (0 disables; the '

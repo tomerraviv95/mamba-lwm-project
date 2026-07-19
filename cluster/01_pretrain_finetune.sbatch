@@ -58,6 +58,7 @@ for PATCH in $PATCHES; do
     $PY spectro/scripts/spectro_pretrain_real.py --arch "$ARCH" --patch "$PATCH" \
       --pretrain-dir "$CORPUS_DIR" $BATCH \
       --steps "$SPECTRO_STEPS" --eval-every "$SPECTRO_EVAL_EVERY" --eval-task "$SPECTRO_EVAL_TASK" \
+      --early-stop-patience "$SPECTRO_EARLY_STOP_PATIENCE" --early-stop-metric "$SPECTRO_EARLY_STOP_METRIC" \
       --n-layers "$N_LAYERS" --router-epochs "$ROUTER_EPOCHS" --mask-percent "$MASK_PERCENT" \
       --w-mlm "$SPECTRO_W_MLM" --w-cont "$SPECTRO_W_CONT" --temperature "$SPECTRO_TEMP" \
       --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" --warmup-frac "$SPECTRO_WARMUP" \
@@ -72,6 +73,7 @@ for PATCH in $PATCHES; do
     --weights-suffix "$SUF" --synth-dir "$DOWNSTREAM_DIR" --run-tag "$DOWNSTREAM_TAG" \
     --sample-counts $SAMPLE_COUNTS --seeds $DOWNSTREAM_SEEDS \
     --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" \
+    --tune-mode "$FT_TUNE_MODE" --tune-last-n "$FT_TUNE_LAST_N" \
     --lora-budget "$LORA_BUDGET" --lora-max-rank "$LORA_MAX_RANK" \
     --epochs "$FT_EPOCHS" --patience "$FT_PATIENCE" --batch-size "$FT_BATCH" \
     --w-recon "$FT_W_RECON" --w-cont "$FT_W_CONT" --temperature "$SPECTRO_TEMP" --mask-percent "$MASK_PERCENT" 2>&1 | tee -a "$LOG"
