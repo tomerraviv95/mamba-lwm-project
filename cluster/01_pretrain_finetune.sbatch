@@ -27,8 +27,8 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTORCH_CUDA_ALLOC_CONF
 PY="${PY:-uv run --no-sync python}"
 
 ARCH="${ARCH:-mamba}"; SUF="${WEIGHTS_SUFFIX}"
-[ "$ARCH" = transformer ] && { ARM=transformer_synth; BATCH="--batch-size $TF_BATCH --accum-steps $TF_ACCUM"; } \
-                          || { ARM=mamba;             BATCH="--batch-size $MAMBA_BATCH --accum-steps $MAMBA_ACCUM"; }
+[ "$ARCH" = transformer ] && { ARM=transformer_synth; BATCH="--batch-size $TF_BATCH --accum-steps $TF_ACCUM"; FT_LAST_N="${TF_TUNE_LAST_N:-$FT_TUNE_LAST_N}"; } \
+                          || { ARM=mamba;             BATCH="--batch-size $MAMBA_BATCH --accum-steps $MAMBA_ACCUM"; FT_LAST_N="${MAMBA_TUNE_LAST_N:-$FT_TUNE_LAST_N}"; }
 LOG="cluster/logs/01_${ARCH}_${SUF}.log"
 echo "=== 01 PRETRAIN + LoRA-FT ($ARM, patches=[$PATCHES], suffix=$SUF) START $(date) ===" | tee -a "$LOG"
 
@@ -73,10 +73,21 @@ for PATCH in $PATCHES; do
     --weights-suffix "$SUF" --synth-dir "$DOWNSTREAM_DIR" --run-tag "$DOWNSTREAM_TAG" \
     --sample-counts $SAMPLE_COUNTS --seeds $DOWNSTREAM_SEEDS \
     --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" \
-    --tune-mode "$FT_TUNE_MODE" --tune-last-n "$FT_TUNE_LAST_N" \
+    --tune-mode "$FT_TUNE_MODE" --tune-last-n "$FT_LAST_N" \
     --lora-budget "$LORA_BUDGET" --lora-max-rank "$LORA_MAX_RANK" \
     --epochs "$FT_EPOCHS" --patience "$FT_PATIENCE" --batch-size "$FT_BATCH" \
     --w-recon "$FT_W_RECON" --w-cont "$FT_W_CONT" --temperature "$SPECTRO_TEMP" --mask-percent "$MASK_PERCENT" 2>&1 | tee -a "$LOG"
+
+  # 3) representation-quality PROBE (frozen mean-pool linear probe): pretrained + random-init control
+  if [ "${RUN_PROBE:-1}" = 1 ]; then
+    echo "===== PROBE $ARM p$PATCH (frozen mean-pool linear probe + random control) $(date) =====" | tee -a "$LOG"
+    for RND in "" "--random"; do
+      $PY spectro/scripts/spectro_probe.py --arch "$ARCH" --patch "$PATCH" --weights-suffix "$SUF" \
+        --synth-dir "$DOWNSTREAM_DIR" --run-tag "$DOWNSTREAM_TAG" \
+        --sample-counts $SAMPLE_COUNTS --seeds $DOWNSTREAM_SEEDS \
+        --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" $RND 2>&1 | tee -a "$LOG"
+    done
+  fi
 done
 
 echo "=== 01 DONE ($ARM) $(date). Publish on the LOGIN node: bash cluster/03_publish.sh ===" | tee -a "$LOG"

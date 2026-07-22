@@ -107,12 +107,13 @@ def _routed(moe, ids, proto, device, masked_pos=None):
 def _finetune_once(moe0, head, proj, ids_all, specs, proto, y, tr, va, te, args, device):
     """One FT run from the pretrained state: returns (test_f1, test_acc). Mutates fresh head/proj/moe."""
     moe = moe0                                     # already reloaded to pretrained state by caller
-    # backbone group = ONLY the trainable LoRA adapter params (base weights are frozen); head+proj full.
-    lora_params = [p for e in moe.experts.values() for p in e.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW([
-        {'params': lora_params, 'lr': args.lr_backbone},
-        {'params': list(head.parameters()) + list(proj.parameters()), 'lr': args.lr_head},
-    ], weight_decay=args.weight_decay)
+    # backbone group = ONLY the trainable params (LoRA adapters, or the unfrozen top blocks; empty when
+    # tune-last-n=0 => fully FROZEN backbone, head-only). head+proj always trained.
+    bb_params = [p for e in moe.experts.values() for p in e.parameters() if p.requires_grad]
+    groups = [{'params': list(head.parameters()) + list(proj.parameters()), 'lr': args.lr_head}]
+    if bb_params:                                  # skip an empty group (frozen backbone) -> Adam-safe
+        groups.insert(0, {'params': bb_params, 'lr': args.lr_backbone})
+    opt = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
     ce = nn.CrossEntropyLoss()
 
     @torch.no_grad()
