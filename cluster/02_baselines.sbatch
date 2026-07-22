@@ -51,4 +51,17 @@ for PATCH in $PATCHES; do
   done
 done
 
+# frozen linear-PROBE of the baselines (same standardized probe as the LWM arms) — the apples-to-apples
+# representation comparison. Run once at the first patch (resnet/deepcnn ignore patch; raw@p4 is fine).
+if [ "${RUN_PROBE:-1}" = 1 ]; then
+  set -- $PATCHES; P0="$1"
+  for ex in $PROBE_BASELINES; do
+    echo "===== PROBE baseline $ex (frozen linear probe) $(date) =====" | tee -a "$LOG"
+    $PY spectro/scripts/spectro_probe.py --extractor "$ex" --patch "$P0" \
+      --synth-dir "$DOWNSTREAM_DIR" --run-tag "$DOWNSTREAM_TAG" \
+      --sample-counts $SAMPLE_COUNTS --seeds $DOWNSTREAM_SEEDS \
+      --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" 2>&1 | tee -a "$LOG"
+  done
+fi
+
 echo "=== 02 DONE $(date). Publish on the LOGIN node: bash cluster/03_publish.sh ===" | tee -a "$LOG"
