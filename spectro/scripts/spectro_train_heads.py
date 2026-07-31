@@ -66,6 +66,31 @@ class DeepCNN(nn.Module):
         return self.features(x)
 
 
+class ResNet18FT(nn.Module):
+    """ImageNet ResNet-18 FINE-TUNED end-to-end on the labelled downstream data (the transfer-learning
+    baseline the paper actually uses, vs. the FROZEN ``resnet18`` feature-extractor arm). Like DeepCNN
+    it overfits in the few-shot regime; ``feat_dim`` is the pooled feature width the head sits on.
+    Spectrogram -> 3-channel ([stft, grid, mean] for dual, replicated for single); ResNet's adaptive
+    pool handles 128x128 directly (no 224 resize needed)."""
+    feat_dim = 512
+
+    def __init__(self, in_channels: int = 2):
+        super().__init__()
+        from torchvision.models import resnet18, ResNet18_Weights
+        m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        m.fc = nn.Identity()
+        self.net = m
+
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        if x.shape[1] == 2:
+            x = torch.stack([x[:, 0], x[:, 1], x.mean(1)], dim=1)
+        elif x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        return self.net(x)
+
+
 def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torch.Tensor:
     """Fixed seeded Gaussian random projection -> (N, out_dim). Only shrinks features WIDER than
     out_dim; returns the input unchanged otherwise. Scaled by 1/sqrt(out_dim) so it approximately
@@ -180,7 +205,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--arm', choices=['transformer', 'transformer_synth', 'mamba', 'raw', 'random_init',
                                       'resnet18', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_small',
-                                      'deepcnn'], required=True)
+                                      'deepcnn', 'resnet18_ft'], required=True)
     ap.add_argument('--head', choices=['cnn1d', 'mlp'], default='cnn1d',
                     help="downstream head for the MoE arms: paper residual 1-D CNN over the token "
                          "sequence (cnn1d, default) or a pooled-feature MLP probe (mlp).")
@@ -244,12 +269,13 @@ def main():
         features = get_baseline_features(data, which=args.baseline)
     elif args.arm in _IMAGENET_ARMS:
         features = _imagenet_features(data, args.arm, device)
-    elif args.arm == 'deepcnn':
-        # end-to-end trained baseline: pass raw spectrograms; the sweep trains a fresh DeepCNN per point
+    elif args.arm in ('deepcnn', 'resnet18_ft'):
+        # end-to-end trained baseline: pass raw spectrograms; the sweep trains a fresh backbone per point
         specs = data.spectrograms
         features = specs.float() if torch.is_tensor(specs) else torch.as_tensor(np.asarray(specs), dtype=torch.float32)
         channels = features.shape[1] if features.dim() == 4 else 1
-        backbone_factory = lambda: DeepCNN(in_channels=channels)   # noqa: E731
+        _bb_cls = DeepCNN if args.arm == 'deepcnn' else ResNet18FT
+        backbone_factory = lambda: _bb_cls(in_channels=channels)  # noqa: E731
         embed_fn = lambda bb, x: bb(x)                             # noqa: E731
     elif args.arm == 'random_init':
         features = _random_init_features(data, device, arch=args.moe_arch, seed=args.seed,
