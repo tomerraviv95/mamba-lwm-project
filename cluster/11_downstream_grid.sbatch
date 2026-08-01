@@ -48,31 +48,32 @@ for d in "$EVAL_INDIST_DIR" "$EVAL_XENV_DIR"; do
 done
 
 # spectro_train_heads.py wrapper: frozen backbone + trainable head (or e2e for deepcnn).
-run_arm() {  # arm run_tag [extra flags...]
-  local arm="$1" tag="$2"; shift 2
+run_arm() {  # arm run_tag restarts [extra flags...]
+  local arm="$1" tag="$2" restarts="$3"; shift 3
   $PY spectro/scripts/spectro_train_heads.py --arm "$arm" --patch "$PATCH" \
     --head "$STUDY_HEAD" --pool "$STUDY_POOL" --synth-dir "$EVAL_DIR" --run-tag "$tag" \
-    --per-class-counts $STUDY_PER_CLASS --seed "$SEED" --head-restarts "$STUDY_HEAD_RESTARTS" \
+    --per-class-counts $STUDY_PER_CLASS --seed "$SEED" --head-restarts "$restarts" \
     --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" "$@" 2>&1 | tee -a "$LOG"
 }
 
+HR="$STUDY_HEAD_RESTARTS"; HR_E2E="${STUDY_E2E_HEAD_RESTARTS:-1}"
 for EV in seen unseen; do
   [ "$EV" = seen ] && EVAL_DIR="$EVAL_INDIST_DIR" || EVAL_DIR="$EVAL_XENV_DIR"
   echo "----- eval=$EV ($(basename "$EVAL_DIR")) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
-  # frozen backbone + MLP head arms
+  # frozen backbone + MLP head arms (best-of-HR head inits)
   for arm in $STUDY_FROZEN_ARMS; do
     if [ "$arm" = mamba ] || [ "$arm" = transformer_synth ]; then
-      run_arm "$arm" "${EV}_s${SEED}" --weights-suffix "$SUF"
+      run_arm "$arm" "${EV}_s${SEED}" "$HR" --weights-suffix "$SUF"
     else
-      run_arm "$arm" "${EV}_s${SEED}"
+      run_arm "$arm" "${EV}_s${SEED}" "$HR"
     fi
   done
   # random-init controls, one per backbone arch
-  run_arm random_init "${EV}_s${SEED}_mambarand" --moe-arch mamba
-  run_arm random_init "${EV}_s${SEED}_tfrand"    --moe-arch transformer
-  # end-to-end arm(s)
+  run_arm random_init "${EV}_s${SEED}_mambarand" "$HR" --moe-arch mamba
+  run_arm random_init "${EV}_s${SEED}_tfrand"    "$HR" --moe-arch transformer
+  # end-to-end arm(s): full-backbone train per restart -> keep restarts low
   for arm in $STUDY_E2E_ARMS; do
-    run_arm "$arm" "${EV}_s${SEED}" --epochs "$STUDY_DEEPCNN_EPOCHS"
+    run_arm "$arm" "${EV}_s${SEED}" "$HR_E2E" --epochs "$STUDY_DEEPCNN_EPOCHS"
   done
 done
 
