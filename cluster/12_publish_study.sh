@@ -30,14 +30,14 @@ else
   echo "== [1/2] no checkpoint dir ($CKPT_DIR) — skip =="
 fi
 
-# 2) collated CSVs -> HF_STUDY_REPO (uploads the parent dir so the study_csv/ subfolder is preserved)
-if ls "$STUDY_CSV_DIR"/study_csv/*.csv >/dev/null 2>&1; then
-  N=$(ls "$STUDY_CSV_DIR"/study_csv/*.csv | wc -l)
-  echo "== [2/2] push $N CSV(s) $STUDY_CSV_DIR/study_csv -> $HF_STUDY_REPO (study_csv/) =="
+# 2) collated CSVs -> HF_STUDY_REPO (uploads the parent dir so each study_csv_{head}/ subfolder is preserved)
+if ls "$STUDY_CSV_DIR"/study_csv*/*.csv >/dev/null 2>&1; then
+  N=$(ls "$STUDY_CSV_DIR"/study_csv*/*.csv | wc -l)
+  echo "== [2/2] push $N CSV(s) from $STUDY_CSV_DIR/study_csv*/ -> $HF_STUDY_REPO =="
   $PY spectro/scripts/hf_sync.py push-dataset --repo "$HF_STUDY_REPO" --dir "$STUDY_CSV_DIR" $PRIV \
     || echo "WARN: CSV push failed"
 else
-  echo "== [2/2] no CSVs under $STUDY_CSV_DIR/study_csv/ — did 11_downstream_grid run? — skip =="
+  echo "== [2/2] no CSVs under $STUDY_CSV_DIR/study_csv*/ — did 11_downstream_grid run? — skip =="
 fi
 
-echo "study publish done ($(date)). Plot locally: python spectro/scripts/plot_from_csv.py --hf-repo $HF_STUDY_REPO"
+echo "study publish done ($(date)). Plot locally: python spectro/scripts/plot_from_csv.py --hf-repo $HF_STUDY_REPO --variant $STUDY_HEAD"

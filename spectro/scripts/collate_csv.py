@@ -33,13 +33,18 @@ ARM_LABELS = {
 PLOT_TASKS = ('modulation', 'snr_doppler')
 
 
-def _classify(dirname: str, patch: int, seed: int):
-    """Return (arm_key, eval_name) for a study submission dir, or None if it isn't part of this (patch,seed)."""
+def _classify(dirname: str, patch: int, seed: int, variant: str = ''):
+    """Return (arm_key, eval_name) for a study submission dir, or None if it isn't part of this
+    (patch, seed[, variant]) run. ``variant`` is the head tag (e.g. 'cnn1d'/'mlp') stamped into the run-tag;
+    when given, only dirs carrying that token are collated (so mlp and cnn1d runs never mix)."""
     m = re.match(rf'^submission_spectro_(.+?)_p{patch}_heldout_(.+)$', dirname)
     if not m:
         return None
     arm_token, rest = m.group(1), m.group(2)
-    if f's{seed}' not in rest.split('_'):                 # this run's seed must appear as an _s{seed}_ token
+    toks = rest.split('_')
+    if f's{seed}' not in toks:                            # this run's seed must appear as an _s{seed}_ token
+        return None
+    if variant and variant not in toks:                  # and the head-variant token, if filtering
         return None
     if 'unseen' in rest:
         ev = 'unseen'
@@ -62,6 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--patch', type=int, required=True)
     ap.add_argument('--seed', type=int, required=True)
+    ap.add_argument('--variant', default='', help="head tag ('cnn1d'/'mlp') to filter dirs by; '' = no filter")
     ap.add_argument('--submissions', default='spectro/outputs/submissions')
     ap.add_argument('--out', default='spectro/outputs/results_csv/study_csv',
                     help='output directory; writes results_p{patch}_s{seed}.csv there')
@@ -71,7 +77,7 @@ def main():
     for path in sorted(glob.glob(os.path.join(args.submissions, 'submission_spectro_*'))):
         if not os.path.isdir(path):
             continue
-        hit = _classify(os.path.basename(path), args.patch, args.seed)
+        hit = _classify(os.path.basename(path), args.patch, args.seed, args.variant)
         if not hit:
             continue
         arm_key, ev = hit

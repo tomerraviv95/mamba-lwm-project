@@ -35,13 +35,13 @@ STYLE = {
 }
 
 
-def maybe_download(hf_repo: str, csv_dir: str):
+def maybe_download(hf_repo: str, csv_dir: str, subdir: str):
     from huggingface_hub import snapshot_download
     tok = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
     os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
-    print(f"downloading CSVs from {hf_repo} -> {csv_dir}")
+    print(f"downloading {subdir}/ CSVs from {hf_repo} -> {csv_dir}")
     snapshot_download(repo_id=hf_repo, repo_type='dataset', local_dir=csv_dir,
-                      allow_patterns=['*.csv', 'study_csv/*.csv'], token=tok)
+                      allow_patterns=[f'{subdir}/*.csv'], token=tok)
 
 
 def load_rows(csv_dir: str):
@@ -73,15 +73,22 @@ def agg(rows, metric):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--csv-dir', default='spectro/outputs/results_csv/study_csv')
-    ap.add_argument('--hf-repo', default=None, help='if set, snapshot_download the CSVs first')
+    ap.add_argument('--csv-dir', default='spectro/outputs/results_csv',
+                    help='local dir holding the study_csv[_variant]/ subfolder (or the CSVs directly)')
+    ap.add_argument('--variant', default='cnn1d', help="head variant subfolder study_csv_{variant} to read")
+    ap.add_argument('--hf-repo', default=None, help='if set, snapshot_download the variant CSVs first')
     ap.add_argument('--metric', choices=['accuracy', 'macro_f1'], default='accuracy')
     ap.add_argument('--out-dir', default='spectro/outputs/plots')
     args = ap.parse_args()
 
+    subdir = f'study_csv_{args.variant}' if args.variant else 'study_csv'
     if args.hf_repo:
-        maybe_download(args.hf_repo, args.csv_dir)
-    rows = load_rows(args.csv_dir)
+        maybe_download(args.hf_repo, args.csv_dir, subdir)
+    # read the variant subfolder if present, else the given dir (supports pointing --csv-dir straight at CSVs)
+    read_root = os.path.join(args.csv_dir, subdir)
+    if not os.path.isdir(read_root):
+        read_root = args.csv_dir
+    rows = load_rows(read_root)
     if not rows:
         raise SystemExit(f"no CSV rows found under {args.csv_dir}")
     A = agg(rows, args.metric)
@@ -108,9 +115,11 @@ def main():
                 ax.set_ylabel(args.metric.replace('_', '-'))
                 ax.set_title(TASK_TITLES.get(task, task)); ax.grid(alpha=0.3); ax.legend(fontsize=7)
             n_seeds = max((A[k][2] for k in A if k[0] == patch and k[1] == ev), default=0)
-            fig.suptitle(f"patch {patch}  |  {ev} cities  |  mean +/- std over {n_seeds} seeds", fontsize=11)
+            fig.suptitle(f"{args.variant} head  |  patch {patch}  |  {ev} cities  |  mean +/- std over {n_seeds} seeds",
+                         fontsize=11)
             plt.tight_layout()
-            out = os.path.join(args.out_dir, f'study_p{patch}_{ev}.png')
+            vtag = f'{args.variant}_' if args.variant else ''
+            out = os.path.join(args.out_dir, f'study_{vtag}p{patch}_{ev}.png')
             plt.savefig(out, dpi=130); plt.close(fig)
             print(f"saved -> {out}")
 

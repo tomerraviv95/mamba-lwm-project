@@ -56,29 +56,29 @@ run_arm() {  # arm run_tag restarts [extra flags...]
     --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" "$@" 2>&1 | tee -a "$LOG"
 }
 
-HR="$STUDY_HEAD_RESTARTS"; HR_E2E="${STUDY_E2E_HEAD_RESTARTS:-1}"
+HR="$STUDY_HEAD_RESTARTS"; HR_E2E="${STUDY_E2E_HEAD_RESTARTS:-1}"; H="$STUDY_HEAD"   # head stamped into run-tags
 for EV in seen unseen; do
   [ "$EV" = seen ] && EVAL_DIR="$EVAL_INDIST_DIR" || EVAL_DIR="$EVAL_XENV_DIR"
-  echo "----- eval=$EV ($(basename "$EVAL_DIR")) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
-  # frozen backbone + MLP head arms (best-of-HR head inits)
+  echo "----- head=$H eval=$EV ($(basename "$EVAL_DIR")) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
+  # frozen backbone + shared head (best-of-HR head inits)
   for arm in $STUDY_FROZEN_ARMS; do
     if [ "$arm" = mamba ] || [ "$arm" = transformer_synth ]; then
-      run_arm "$arm" "${EV}_s${SEED}" "$HR" --weights-suffix "$SUF"
+      run_arm "$arm" "${H}_${EV}_s${SEED}" "$HR" --weights-suffix "$SUF"
     else
-      run_arm "$arm" "${EV}_s${SEED}" "$HR"
+      run_arm "$arm" "${H}_${EV}_s${SEED}" "$HR"
     fi
   done
   # random-init controls, one per backbone arch
-  run_arm random_init "${EV}_s${SEED}_mambarand" "$HR" --moe-arch mamba
-  run_arm random_init "${EV}_s${SEED}_tfrand"    "$HR" --moe-arch transformer
+  run_arm random_init "${H}_${EV}_s${SEED}_mambarand" "$HR" --moe-arch mamba
+  run_arm random_init "${H}_${EV}_s${SEED}_tfrand"    "$HR" --moe-arch transformer
   # end-to-end arm(s): full-backbone train per restart -> keep restarts low
   for arm in $STUDY_E2E_ARMS; do
-    run_arm "$arm" "${EV}_s${SEED}" "$HR_E2E" --epochs "$STUDY_DEEPCNN_EPOCHS"
+    run_arm "$arm" "${H}_${EV}_s${SEED}" "$HR_E2E" --epochs "$STUDY_DEEPCNN_EPOCHS"
   done
 done
 
-echo "----- collate CSV p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
-$PY spectro/scripts/collate_csv.py --patch "$PATCH" --seed "$SEED" \
-  --submissions "$REPO_ROOT/spectro/outputs/submissions" --out "$STUDY_CSV_DIR/study_csv" 2>&1 | tee -a "$LOG"
+echo "----- collate CSV (variant=$H) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
+$PY spectro/scripts/collate_csv.py --patch "$PATCH" --seed "$SEED" --variant "$H" \
+  --submissions "$REPO_ROOT/spectro/outputs/submissions" --out "$STUDY_CSV_DIR/study_csv_${H}" 2>&1 | tee -a "$LOG"
 
 echo "=== 11 DONE idx=$IDX (p$PATCH s$SEED) $(date). Publish on the LOGIN node: bash cluster/12_publish_study.sh ===" | tee -a "$LOG"

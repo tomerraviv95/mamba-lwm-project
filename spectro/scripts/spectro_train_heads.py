@@ -103,19 +103,27 @@ def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torc
     return features.float() @ W
 
 
-def _raw_features(data, patch=4) -> torch.Tensor:
-    """Mean-pooled raw patches -> (N, patch*patch) lower-bound features."""
+def _raw_features(data, patch=4, as_sequence=False) -> torch.Tensor:
+    """Raw patches lower-bound features. ``as_sequence`` -> the patch sequence (N, n_patches, E) for the
+    CNN head; else mean-pooled (N, E)."""
     patches = spectrogram_patchify(data.spectrograms, patch=patch, normalize=True)  # (N,n_patches,E)
+    if as_sequence:
+        return torch.tensor(patches, dtype=torch.float32)
     return torch.tensor(patches.mean(axis=1), dtype=torch.float32)
 
 
-def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
-    """Frozen ImageNet-pretrained vision backbone as a fixed feature extractor -> (N, feat_dim).
+def _imagenet_features(data, model_name, device, batch=64, as_sequence=False) -> torch.Tensor:
+    """Frozen ImageNet-pretrained vision backbone as a fixed feature extractor.
 
     A generic-vision baseline: the spectrogram is turned into a 3-channel 224x224 image (2-channel
     dual [STFT|grid] -> [stft, grid, mean]; 1-channel -> replicated) and run through a frozen
-    torchvision model with its classifier removed. Shows how much a domain-agnostic pretrained CNN
-    recovers vs. our in-domain LWM MoE."""
+    torchvision model. Shows how much a domain-agnostic pretrained CNN recovers vs. our in-domain LWM MoE.
+
+    ``as_sequence=False`` -> pooled ``(N, feat_dim)`` (the model's own global-average-pooled vector, for
+    the MLP head). ``as_sequence=True`` -> the pre-pool conv feature map as a SPATIAL-TOKEN sequence
+    ``(N, H*W, C)`` (e.g. ResNet-18: 7x7x512 -> 49 tokens of 512-d), so the SAME 1-D CNN head used for the
+    LWM token sequence sits on ResNet too — apples-to-apples head recipe across all frozen arms."""
+    import torch.nn as nn
     import torch.nn.functional as F
     from torchvision.models import (resnet18, ResNet18_Weights, resnet50, ResNet50_Weights,
                                     efficientnet_b0, EfficientNet_B0_Weights,
@@ -127,8 +135,14 @@ def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
            'mobilenet_v3_small': (mobilenet_v3_small, MobileNet_V3_Small_Weights.IMAGENET1K_V1, 'classifier')}
     ctor, weights, clf_attr = reg[model_name]
     model = ctor(weights=weights)
-    setattr(model, clf_attr, torch.nn.Identity())           # -> pooled feature vector (no classifier)
-    model = model.to(device).eval()
+    if as_sequence:
+        # keep everything up to (but not including) the global pool + classifier -> (N, C, h, w)
+        extractor = nn.Sequential(*list(model.children())[:-2]) if model_name in ('resnet18', 'resnet50') \
+            else model.features
+    else:
+        setattr(model, clf_attr, torch.nn.Identity())       # -> pooled feature vector (no classifier)
+        extractor = model
+    extractor = extractor.to(device).eval()
     specs = data.spectrograms
     if torch.is_tensor(specs):
         specs = specs.float()
@@ -145,7 +159,10 @@ def _imagenet_features(data, model_name, device, batch=64) -> torch.Tensor:
             elif x.shape[1] == 1:
                 x = x.repeat(1, 3, 1, 1)
             x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
-            out.append(model(x).float().cpu())
+            y = extractor(x)
+            if as_sequence:
+                y = y.flatten(2).transpose(1, 2)              # (b,C,h,w) -> (b, h*w, C) token sequence
+            out.append(y.float().cpu())
     return torch.cat(out)
 
 
@@ -268,7 +285,7 @@ def main():
     if args.arm == 'transformer':
         features = get_baseline_features(data, which=args.baseline)
     elif args.arm in _IMAGENET_ARMS:
-        features = _imagenet_features(data, args.arm, device)
+        features = _imagenet_features(data, args.arm, device, as_sequence=seq)
     elif args.arm in ('deepcnn', 'resnet18_ft'):
         # end-to-end trained baseline: pass raw spectrograms; the sweep trains a fresh backbone per point
         specs = data.spectrograms
@@ -285,7 +302,7 @@ def main():
         features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool,
                                  weights_suffix=args.weights_suffix, as_sequence=seq)
     else:
-        features = _raw_features(data, patch=args.patch)
+        features = _raw_features(data, patch=args.patch, as_sequence=seq)
     if args.project_dim and features.dim() == 2:   # equal-width head comparison (pooled features only)
         pre = features.shape[1]
         features = _random_project(features, args.project_dim, seed=args.seed)
