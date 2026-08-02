@@ -146,11 +146,14 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     model = build_expert(arch, d_model=args.d_model, n_layers=args.n_layers,
                          element_length=args.element_length, max_len=args.max_len).to(device)
     use_cont = args.w_cont > 0                   # paper: pretraining is reconstruction-only (contrastive off)
+    use_mob = use_cont and len(np.unique(np.asarray(mob))) > 1   # skip SupCon-mob when mobility absent/degenerate
     proj_mod = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device) if use_cont else None
-    proj_mob = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device) if use_cont else None
+    proj_mob = ProjectionHead(args.d_model, 128, pool=args.proj_pool).to(device) if use_mob else None
     params = list(model.parameters())
     if use_cont:
-        params += list(proj_mod.parameters()) + list(proj_mob.parameters())
+        params += list(proj_mod.parameters())
+    if use_mob:
+        params += list(proj_mob.parameters())
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     warmup = max(1, int(args.warmup_frac * args.steps))
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [
@@ -162,7 +165,9 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
     def _train_mode():
         model.train()
         if use_cont:
-            proj_mod.train(); proj_mob.train()
+            proj_mod.train()
+        if use_mob:
+            proj_mob.train()
 
     history, step = [], 0
     accum = max(1, args.accum_steps)            # >1: micro-batch grad accumulation (effective batch = batch*accum)
@@ -208,10 +213,13 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
             if use_cont:                        # fine-tuning-stage objective (off during paper pretraining)
                 sc_mod = supervised_contrastive_loss(proj_mod(output), b_mod, temperature=args.temperature,
                                                      base_temperature=args.temperature)
-                sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
-                                                     base_temperature=args.temperature)
-                loss = loss + args.w_cont * sc_mod + args.w_cont * sc_mob
-                sc_mod_v += sc_mod.item() / accum; sc_mob_v += sc_mob.item() / accum
+                loss = loss + args.w_cont * sc_mod
+                sc_mod_v += sc_mod.item() / accum
+                if use_mob:
+                    sc_mob = supervised_contrastive_loss(proj_mob(output), b_mob, temperature=args.temperature,
+                                                         base_temperature=args.temperature)
+                    loss = loss + args.w_cont * sc_mob
+                    sc_mob_v += sc_mob.item() / accum
             loss = loss / accum
             loss.backward()
             mlm_v += mlm.item() / accum
@@ -383,8 +391,8 @@ def main():
         mod = pre.labels['modulation'][sel]
         _mob = pre.labels.get('mobility')
         if _mob is None:
-            if args.w_cont > 0 or args.eval_task == 'mobility':
-                raise SystemExit("mobility labels needed (w_cont>0 or --eval-task mobility) but 'mobility' "
+            if args.eval_task == 'mobility':
+                raise SystemExit("mobility labels needed (--eval-task mobility) but 'mobility' "
                                  "is not a task in this corpus; add it to spectro_data.TASKS/EXTRA_TASKS.")
             _mob = np.zeros(len(pre.labels['modulation']), dtype=np.int64)
         mob = _mob[sel]
