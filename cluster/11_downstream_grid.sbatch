@@ -56,7 +56,7 @@ run_arm() {  # arm run_tag restarts [extra flags...]
     --val-frac "$VAL_FRAC" --test-frac "$TEST_FRAC" "$@" 2>&1 | tee -a "$LOG"
 }
 
-HR="$STUDY_HEAD_RESTARTS"; HR_E2E="${STUDY_E2E_HEAD_RESTARTS:-1}"; H="$STUDY_HEAD"   # head stamped into run-tags
+HR="$STUDY_HEAD_RESTARTS"; HR_E2E="${STUDY_E2E_HEAD_RESTARTS:-1}"; H="${STUDY_VARIANT:-$STUDY_HEAD}"   # namespace stamped into run-tags/CSV (head itself = $STUDY_HEAD inside run_arm)
 for EV in seen unseen; do
   [ "$EV" = seen ] && EVAL_DIR="$EVAL_INDIST_DIR" || EVAL_DIR="$EVAL_XENV_DIR"
   echo "----- head=$H eval=$EV ($(basename "$EVAL_DIR")) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
