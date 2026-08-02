@@ -34,7 +34,7 @@ from phy_params import (CARRIER_FREQUENCY_HZ, MOBILITIES, MOBILITY_SPEED_MS, MOB
 from sionna.phy.ofdm import OFDMDemodulator  # noqa: E402
 from sionna_blocks import DEVICE, _BINARY_SOURCE, _ofdm_chain  # noqa: E402
 from spectrogram import (iq_batch_to_spectrogram, iq_batch_to_complex_spectrogram,  # noqa: E402
-                         grid_mag_to_spectrogram)
+                         grid_mag_to_spectrogram, grid_complex_to_spectrogram)
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 _DEFAULT_OUT = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo')
@@ -114,11 +114,14 @@ def main():
     ap.add_argument('--complex', action='store_true',
                     help='store (2,128,128) [real,imag] complex spectrograms (element_length=32) '
                          'instead of (1,128,128) magnitude — the authors\' contrastive representation')
-    ap.add_argument('--repr', choices=['stft', 'grid', 'grid_stft'], default='stft',
+    ap.add_argument('--repr', choices=['stft', 'grid', 'grid_stft', 'grid_complex'], default='stft',
                     help="spectrogram representation. 'stft' = |STFT| of the time-domain OFDM waveform "
                          "(modulation NOT encoded — OFDM averages the constellation away). 'grid' = "
                          "|demodulated received resource grid| (subcarrier x symbol) where modulation "
-                         "order IS visible; SNR/fading/Doppler also present. Use 'grid' for the mod task.")
+                         "order IS PARTLY visible (amplitude only; BPSK/QPSK confusable). 'grid_complex' = "
+                         "2-channel [Re(Y),Im(Y)] of that grid — KEEPS PHASE so the full constellation "
+                         "(incl BPSK vs QPSK) is separable. Use 'grid' for the mod task, 'grid_complex' "
+                         "for the phase-bearing IQ study.")
     ap.add_argument('--cities', default=None,
                     help='comma-separated scenario names (optionally name:bs_idx) to use instead of the '
                          'default 20 CITY_SCENARIOS. Held-out cross-environment eval set with their BS sets: '
@@ -173,7 +176,7 @@ def main():
         l_tot = l_max - l_min + 1
         apply = None
         demod = (OFDMDemodulator(cfg.fft_size, l_min, cfg.cyclic_prefix_length).to(DEVICE)
-                 if args.repr in ('grid', 'grid_stft') else None)   # received-grid (modulation visible)
+                 if args.repr in ('grid', 'grid_stft', 'grid_complex') else None)   # received-grid (modulation visible)
         for s in range(0, len(idxs), args.batch):
             bi = idxs[s:s + args.batch]
             b = len(bi)
@@ -200,6 +203,9 @@ def main():
             if args.repr == 'grid':                           # demod -> |received resource grid|
                 Y = demod(yn.reshape(b, 1, 1, -1))            # (b,1,1,num_ofdm_symbols,fft_size)
                 specs = grid_mag_to_spectrogram(Y.abs().reshape(b, -1, cfg.fft_size)).cpu()
+            elif args.repr == 'grid_complex':                 # demod -> COMPLEX received grid [Re,Im] (keeps phase)
+                Y = demod(yn.reshape(b, 1, 1, -1))
+                specs = grid_complex_to_spectrogram(Y.reshape(b, -1, cfg.fft_size)).cpu()   # (b,2,128,128)
             elif args.repr == 'grid_stft':                    # 2ch [STFT (Doppler/mobility) | grid (modulation)]
                 Y = demod(yn.reshape(b, 1, 1, -1))
                 g = grid_mag_to_spectrogram(Y.abs().reshape(b, -1, cfg.fft_size))   # (b,1,128,128)

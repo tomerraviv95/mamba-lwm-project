@@ -93,6 +93,29 @@ def grid_mag_to_spectrogram(grid_mag: torch.Tensor, out_size: int = OUT_SIZE,
     return db.to(torch.float16)                                    # (n,1,out,out)
 
 
+def grid_complex_to_spectrogram(grid_c: torch.Tensor, out_size: int = OUT_SIZE,
+                                normalize: bool = True) -> torch.Tensor:
+    """COMPLEX received resource grid Y[k,n] -> (n, 2, out, out) float16 [real, imag].
+
+    Like ``grid_mag_to_spectrogram`` but KEEPS PHASE: the two channels are Re(Y) and Im(Y) of the
+    demodulated received grid. Magnitude alone cannot separate BPSK from QPSK (both constant |.|); the
+    full complex grid exposes the constellation (I/Q per resource element) so ALL modulation orders are
+    distinguishable. NEAREST resize (no averaging of the per-RE constellation). Per-sample z-score is
+    applied JOINTLY across both channels (preserves the I/Q relationship / phase)."""
+    g = grid_c if torch.is_tensor(grid_c) else torch.as_tensor(grid_c)
+    if not torch.is_complex(g):
+        g = g.to(torch.complex64)
+    if g.dim() == 2:
+        g = g[None]
+    ri = torch.stack([g.real, g.imag], dim=1).float()              # (n, 2, n_sym, fft)
+    ri = F.interpolate(ri, size=(out_size, out_size), mode="nearest")
+    if normalize:
+        mean = ri.mean(dim=(1, 2, 3), keepdim=True)
+        std = torch.clamp(ri.std(dim=(1, 2, 3), keepdim=True), min=1e-6)
+        ri = (ri - mean) / std
+    return ri.to(torch.float16)                                    # (n, 2, out, out)
+
+
 def iq_batch_to_complex_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int = OUT_SIZE,
                                     normalize: bool = True) -> torch.Tensor:
     """Batched COMPLEX spectrogram: (n, T) complex -> (n, 2, out, out) float16 [real, imag].
