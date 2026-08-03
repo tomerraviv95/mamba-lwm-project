@@ -126,7 +126,9 @@ def load_synthetic_data(out_dir: str, seed: int = 42, val_frac: float = 0.15,
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
     protocol = np.array([proto_to_idx[_field_str(s, 'tech')] for s in samples], dtype=np.int64)
 
-    labels, label_names = _build_labels(samples, protocol)
+    # build TASKS + EXTRA_TASKS so 'mobility'/'snr' are available (e.g. the SupCon-mobility pretraining term
+    # needs a standalone 'mobility' label; extra keys are ignored by downstream arms that don't request them).
+    labels, label_names = _build_labels(samples, protocol, {**TASKS, **EXTRA_TASKS})
     del samples                                         # release the raw dict list (~corpus-sized)
 
     train_idx, val_idx, test_idx = _stratified_split(protocol, seed=seed,
