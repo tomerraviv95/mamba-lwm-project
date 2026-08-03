@@ -31,6 +31,7 @@ STYLE = {
     'Transformer (random init)':    ('#1f77b4', '--', 'x', 1.3),
     'DeepCNN (end-to-end)':         ('#2ca02c', '-.', 'D', 1.6),
     'ResNet-18 (frozen)':           ('#9467bd', ':',  'v', 1.4),
+    'MobileNetV3-S (frozen, param-matched)': ('#e377c2', ':', 'P', 1.6),
     'raw patches':                  ('#7f7f7f', ':',  '.', 1.0),
 }
 

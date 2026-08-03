@@ -27,6 +27,7 @@ ARM_LABELS = {
     'random_init_mambarand': 'Mamba (random init)',
     'random_init_tfrand':    'Transformer (random init)',
     'resnet18':              'ResNet-18 (frozen)',
+    'mobilenet_v3_small':    'MobileNetV3-S (frozen, param-matched)',
     'raw':                   'raw patches',
     'deepcnn':               'DeepCNN (end-to-end)',
 }
@@ -58,7 +59,7 @@ def _classify(dirname: str, patch: int, seed: int, variant: str = ''):
         if rest.endswith('tfrand'):
             return 'random_init_tfrand', ev
         return None
-    if arm_token in ('mamba', 'transformer_synth', 'resnet18', 'raw', 'deepcnn'):
+    if arm_token in ('mamba', 'transformer_synth', 'resnet18', 'mobilenet_v3_small', 'raw', 'deepcnn'):
         return arm_token, ev
     return None
 

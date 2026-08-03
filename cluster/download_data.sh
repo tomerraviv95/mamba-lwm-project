@@ -67,7 +67,7 @@ fetch "$HF_GRIDSTFT_REPO" eval "$CORPUS_DIR" "$EVAL_XENV_DIR" "$EVAL_XENV_DIR"
 # checkpoint (~/.cache/torch/hub/checkpoints, shared home) is found at job time. Best-effort/non-fatal.
 IMAGENET_ARMS="resnet18 resnet50 efficientnet_b0 mobilenet_v3_small"
 want=""
-for a in ${BASELINES:-}; do case " $IMAGENET_ARMS " in *" $a "*) want="$want $a";; esac; done
+for a in ${BASELINES:-} ${STUDY_FROZEN_ARMS:-}; do case " $IMAGENET_ARMS " in *" $a "*) case " $want " in *" $a "*) ;; *) want="$want $a";; esac;; esac; done
 if [ -n "$want" ]; then
   echo "--- pre-caching ImageNet weights for:$want ---"
   # shellcheck disable=SC2086
