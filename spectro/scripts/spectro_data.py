@@ -94,7 +94,7 @@ class SpectroData:
 
 
 def load_synthetic_data(out_dir: str, seed: int = 42, val_frac: float = 0.15,
-                        test_frac: float = 0.15) -> "SpectroData":
+                        test_frac: float = 0.15, protocols=None, cap: int | None = None) -> "SpectroData":
     """Load a synthetic corpus produced by ``spectro/datagen/generate.py``.
 
     Reads the shards listed in ``manifest.json`` into a ``SpectroData`` with the same task
@@ -102,27 +102,74 @@ def load_synthetic_data(out_dir: str, seed: int = 42, val_frac: float = 0.15,
     the real demo data). Intended for pretraining the Mamba MoE on a larger corpus. Downstream
     finetuning passes ``val_frac=0.10, test_frac=0.20`` (a 70/10/20 split); the default 0.15/0.15
     keeps the pretraining in-corpus probe unchanged.
+
+    ``protocols``: keep only samples whose ``tech`` is in this set, filtering DURING the streaming
+    read. The MoE trains one expert per protocol, so an expert only ever needs its own third of the
+    corpus -- loading all of it costs 13.5 GB on the 398k corpus vs 4.5 GB filtered, which is the
+    difference between OOMing a 25 GB host and fitting comfortably. Re-reading the shards per
+    protocol costs ~2 min each, far cheaper than the memory.
+    ``cap``: stop after this many kept samples (used by the router pass, which needs a mixed but
+    small sample).
     """
     import json
     with open(os.path.join(out_dir, 'manifest.json')) as f:
         manifest = json.load(f)
-    samples = []
+
+    # A single-carrier corpus is stored already normalized with corpus-level dB statistics; tell
+    # the patchifier not to re-apply a per-sample z-score on top (that would delete the modulation
+    # cue -- see spectro_patchify.set_corpus_prenormalized). Legacy OFDM corpora carry no
+    # 'waveform' key and keep the old per-sample behaviour.
+    from spectro_patchify import set_corpus_prenormalized
+    set_corpus_prenormalized(manifest.get('waveform') == 'sc' and manifest.get('sc_norm') == 'global',
+                             source=os.path.basename(os.path.normpath(out_dir)))
+
+    # STREAMING LOAD. The previous version extended one `samples` list across every shard and THEN
+    # stacked it, holding the raw dicts and the stacked tensor simultaneously -> ~2x the corpus in
+    # RAM (26 GB for the 398k corpus on a 25 GB box = OOM). Here the destination tensor is
+    # preallocated from manifest['n_samples'] and each shard is copied in and freed immediately, so
+    # the peak is one corpus + one shard.
+    n_total = int(manifest.get('n_samples', 0))
+    specs = None
+    metas: list = []
+    filled = 0
     for shard in manifest['shards']:
         sp = os.path.join(out_dir, shard)
         try:
-            samples.extend(torch.load(sp, weights_only=False))
+            chunk = torch.load(sp, weights_only=False)
         except Exception as e:                       # truncated/empty shard from an interrupted download
             sz = os.path.getsize(sp) if os.path.isfile(sp) else -1
             raise RuntimeError(
                 f"failed to load shard {sp} ({sz} bytes): {type(e).__name__}: {e}. "
                 f"The download is likely incomplete — re-fetch with "
                 f"`FORCE=1 bash cluster/download_data.sh` (or hf_download_gridstft.py --force).") from e
+        if specs is None:
+            d0 = chunk[0]['data'].squeeze(0)
+            n_alloc = n_total if n_total else sum(1 for _ in manifest['shards']) * len(chunk)
+            specs = torch.empty((n_alloc, *d0.shape), dtype=torch.float16)
+        for r in chunk:
+            if filled >= specs.shape[0] or (cap and filled >= cap):
+                break
+            if protocols is not None and _field_str(r, 'tech') not in protocols:
+                continue
+            specs[filled] = r['data'].squeeze(0).to(torch.float16)
+            # keep only the small label fields, not the tensors
+            metas.append({k: r[k] for k in ('tech', 'snr', 'mod', 'mob') if k in r})
+            filled += 1
+        del chunk
+        if cap and filled >= cap:
+            break
+    if specs is None:
+        raise RuntimeError(f"no shards loaded from {out_dir}")
+    if filled != specs.shape[0]:
+        # The buffer is preallocated at manifest n_samples, so a FILTERED load (protocols=/cap=)
+        # leaves it mostly empty -- and specs[:filled] is a VIEW that keeps the full allocation
+        # alive. clone() the used rows and drop the big buffer, otherwise per-protocol loading
+        # saves nothing (13 GB stays resident instead of 4.5 GB).
+        kept = specs[:filled].clone()
+        del specs
+        specs = kept
+    samples = metas
 
-    # Keep the corpus in FLOAT16 (the source `data` is already float16) — a large corpus (132k x
-    # 2ch x 128x128) is ~17 GB in float32 but ~8.7 GB in float16, and downstream casts to float() per
-    # batch anyway. Then free the per-sample dict list (another ~corpus-sized chunk) so the pretrain
-    # host doesn't OOM. Costs a little accuracy in the z-score stats (negligible).
-    specs = torch.stack([s['data'].squeeze(0).to(torch.float16) for s in samples])
     proto_to_idx = {p: i for i, p in enumerate(PROTOCOLS)}
     protocol = np.array([proto_to_idx[_field_str(s, 'tech')] for s in samples], dtype=np.int64)
 

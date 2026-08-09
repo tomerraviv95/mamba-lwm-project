@@ -74,6 +74,54 @@ PROTOCOL_CONFIGS = {
 }
 
 
+# ---- single-carrier numerology (LWM-Spectro eq. 4) ----------------------------------------
+# The reference paper uses a single-carrier PULSE-SHAPED waveform, not OFDM. "WiFi"/"LTE"/"5G"
+# there denote different bandwidths, MCS sets and pulse/coding parameters -- not OFDM
+# numerologies. These configs mirror that: distinct sample rates + roll-offs (so the protocol
+# router still has a learnable spectral footprint) over a common burst length.
+#
+# Burst duration is what makes mobility learnable. num_symbols*sps samples at `sample_rate`:
+#   LTE 262144 @ 15.36 MHz = 17.1 ms | WiFi 262144 @ 20 MHz = 13.1 ms | 5G 262144 @ 30.72 MHz = 8.5 ms
+# MEASURED Doppler budget across the LTE burst (cycles of phase rotation):
+#   static 0 | pedestrian 0.10-1.00 | vehicular 1.59-9.96
+# The earlier 4.27 ms burst gave pedestrian only 0.02-0.25 cycles -- indistinguishable from static,
+# which pinned 3-way mobility at chance. sps=2 (not 4) is deliberate: it keeps occupancy at
+# (1+beta)/2 ~ 68% of the band and lets 128 frames x 4 symbols observe ~512 symbols; sps=4 drops
+# occupancy to 34% and halves the observed symbol count, measurably costing modulation
+# (macro-F1 0.416 -> 0.298, BPSK/QPSK accuracy 0.802 -> 0.473).
+@dataclass(frozen=True)
+class SingleCarrierConfig:
+    name: str
+    sample_rate: float        # Hz
+    sps: int                  # N_os, samples per symbol (oversampling factor)
+    rolloff: float            # RRC beta; occupied bandwidth = (1+beta)/sps of sample_rate
+    span_symbols: int         # RRC span -> filter length N_g = span*sps + 1
+    num_symbols: int          # N_s symbols per burst
+
+    @property
+    def num_samples(self) -> int:
+        return self.num_symbols * self.sps
+
+    @property
+    def duration_s(self) -> float:
+        return self.num_samples / self.sample_rate
+
+    @property
+    def occupied_frac(self) -> float:
+        """Fraction of the simulated band the shaped signal occupies."""
+        return (1.0 + self.rolloff) / self.sps
+
+
+SC_CONFIGS = {
+    "WiFi": SingleCarrierConfig("WiFi", sample_rate=20.00e6, sps=2, rolloff=0.25,
+                                span_symbols=10, num_symbols=131072),
+    "LTE": SingleCarrierConfig("LTE", sample_rate=15.36e6, sps=2, rolloff=0.35,
+                               span_symbols=10, num_symbols=131072),
+    "5G": SingleCarrierConfig("5G", sample_rate=30.72e6, sps=2, rolloff=0.15,
+                              span_symbols=10, num_symbols=131072),
+}
+
+
 def doppler_hz(mobility: str) -> float:
     speed = MOBILITY_SPEED_MS[mobility]
     return speed * CARRIER_FREQUENCY_HZ / SPEED_OF_LIGHT

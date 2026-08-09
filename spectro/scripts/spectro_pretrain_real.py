@@ -132,9 +132,10 @@ def pretrain_expert_steps(specs, mod, mob, *, arch, proto, demo, eval_task, devi
                                                  seed=args.seed + 7, patch=args.patch, half=True)
         val_mlm = (vids, vtoks, vpos)
 
-    tr_specs = specs[torch.as_tensor(tr_i)]
-    ids, toks, pos = build_masked_tensors(tr_specs, mask_percent=args.mask_percent, seed=args.seed,
-                                          patch=args.patch, half=True)   # float16 -> RAM-safe for big corpora
+    # index= (not a materialized slice): avoids a 4.35 GB copy of one protocol's spectrograms on
+    # the 398k corpus, which is the difference between fitting and OOMing a 25 GB host.
+    ids, toks, pos = build_masked_tensors(specs, index=tr_i, mask_percent=args.mask_percent,
+                                          seed=args.seed, patch=args.patch, half=True)
     mod_t = torch.as_tensor(np.asarray(mod)[tr_i], dtype=torch.long)
     mob_t = torch.as_tensor(np.asarray(mob)[tr_i], dtype=torch.long)
     loader = DataLoader(TensorDataset(ids, toks, pos, mod_t, mob_t),
@@ -319,6 +320,12 @@ def main():
     ap.add_argument('--d-model', type=int, default=128)
     ap.add_argument('--n-layers', type=int, default=12)
     ap.add_argument('--router-epochs', type=int, default=8)
+    ap.add_argument('--protocols', nargs='+', default=None,
+                    help='train ONLY these experts (e.g. --protocols LTE). The corpus is then loaded '
+                         'filtered to that protocol, so peak RAM is ~1/3. Router training is skipped '
+                         'unless --with-router; run a final pass with --router-only to build it.')
+    ap.add_argument('--router-only', action='store_true',
+                    help='skip expert training; load a small mixed sample and train the router only.')
     # paper Table I
     ap.add_argument('--mask-percent', type=float, default=0.7)
     ap.add_argument('--w-mlm', type=float, default=1.0)
@@ -342,7 +349,10 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.manual_seed(args.seed)
-    pre = load_synthetic_data(args.pretrain_dir, seed=args.seed)
+    _protos = list(args.protocols) if args.protocols else None
+    pre = load_synthetic_data(args.pretrain_dir, seed=args.seed,
+                              protocols=set(_protos) if _protos else None,
+                              cap=40000 if args.router_only else None)
     if args.max_samples and args.max_samples < pre.spectrograms.shape[0]:
         # seeded subsample of the whole corpus -> proportionally shrinks every protocol (data-scaling)
         n_full = pre.spectrograms.shape[0]
@@ -377,7 +387,9 @@ def main():
           f"steps={args.steps}/expert eval_every={args.eval_every} "
           f"task={args.eval_task} batch={args.batch_size} corpus={pre.spectrograms.shape[0]} "
           f"(w_mlm={args.w_mlm}, w_cont={args.w_cont}, tau={args.temperature}, mask={args.mask_percent})")
-    for proto in PROTOCOLS:
+    for proto in (_protos or PROTOCOLS):
+        if args.router_only:
+            break
         p_idx = PROTOCOLS.index(proto)
         sel = np.where(pre.protocol == p_idx)[0]
         n_full = len(sel)
@@ -401,7 +413,9 @@ def main():
         state, history, base = pretrain_expert_steps(specs, mod, mob, arch=args.arch, proto=proto,
                                                      demo=demo, eval_task=args.eval_task, device=device,
                                                      args=args, wandb_run=wandb_run)
+        _so = os.environ.get('SPECTRO_SO_EMBED', '1') not in ('0', 'false', 'False')
         torch.save({'state_dict': state, 'arch': args.arch, 'd_model': args.d_model,
+                    'second_order_embed': _so,
                     'n_layers': args.n_layers, 'patch': args.patch,
                     'element_length': args.element_length, 'max_len': args.max_len},
                    os.path.join(out_dir, f"{proto}_expert.pth"))
@@ -410,6 +424,10 @@ def main():
         final = history[-1]['demo_acc'] if history else float('nan')
         print(f"[Expert {proto}] saved. demo {args.eval_task}: {base:.4f} (init) -> {final:.4f} (final)")
 
+    if _protos and not args.router_only:
+        print(f"\nDone. experts {_protos} saved in {out_dir}. "
+              f"Run once more with --router-only to build the router.")
+        return
     print("\n[Router] training protocol router")
     ridx = np.random.RandomState(args.seed).permutation(len(pre.protocol))[:40000]  # cap for speed
     r_state, r_acc = train_router(pre.spectrograms[torch.as_tensor(ridx)], pre.protocol[ridx],

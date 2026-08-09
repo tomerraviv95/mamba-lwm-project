@@ -2,7 +2,7 @@
 #SBATCH --job-name=lwm-study-pretrain
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=96G   # 1.33M-sample corpus: ~15 GB/protocol + masked tensors; 96G is headroom
 #SBATCH --time=24:00:00
 #SBATCH --array=0-19
 #SBATCH --output=cluster/logs/10_pretrain_%A_%a.out
@@ -59,15 +59,42 @@ if done3 "$WDIR"; then
   echo "## $ARM p$PATCH seed$SEED already pretrained ($WDIR) — skip" | tee -a "$LOG"; exit 0
 fi
 
-$PY spectro/scripts/spectro_pretrain_real.py --arch "$ARCH" --patch "$PATCH" \
-  --pretrain-dir "$CORPUS_DIR" $BATCH \
-  --steps "$SPECTRO_STEPS" --eval-every "$SPECTRO_EVAL_EVERY" --eval-task "$SPECTRO_EVAL_TASK" \
-  --early-stop-patience "$SPECTRO_EARLY_STOP_PATIENCE" --early-stop-metric "$SPECTRO_EARLY_STOP_METRIC" \
-  --n-layers "$N_LAYERS" --router-epochs "$ROUTER_EPOCHS" --mask-percent "$MASK_PERCENT" \
-  --w-mlm "$SPECTRO_W_MLM" --w-cont "$SPECTRO_W_CONT" --temperature "$SPECTRO_TEMP" \
-  --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" --warmup-frac "$SPECTRO_WARMUP" \
-  --weight-decay "$SPECTRO_WD" --seed "$SEED" --weights-suffix "$SUF" --probe-heldout-frac 0.1 \
-  --wandb --wandb-project "$WANDB_PROJECT" --run-name "study-pretrain-${ARM}-p${PATCH}-s${SEED}" 2>&1 | tee -a "$LOG"
+# Shared flags for every expert invocation.
+PRE_ARGS=( --arch "$ARCH" --patch "$PATCH" --pretrain-dir "$CORPUS_DIR" $BATCH
+  --steps "$SPECTRO_STEPS" --eval-every "$SPECTRO_EVAL_EVERY" --eval-task "$SPECTRO_EVAL_TASK"
+  --early-stop-patience "$SPECTRO_EARLY_STOP_PATIENCE" --early-stop-metric "$SPECTRO_EARLY_STOP_METRIC"
+  --n-layers "$N_LAYERS" --mask-percent "$MASK_PERCENT"
+  --w-mlm "$SPECTRO_W_MLM" --w-cont "$SPECTRO_W_CONT" --temperature "$SPECTRO_TEMP"
+  --lr "$SPECTRO_LR" --min-lr "$SPECTRO_MIN_LR" --warmup-frac "$SPECTRO_WARMUP"
+  --weight-decay "$SPECTRO_WD" --seed "$SEED" --weights-suffix "$SUF" --probe-heldout-frac 0.1 )
+
+if [ "${SC_PER_EXPERT:-0}" = "1" ]; then
+  # ONE EXPERT PER INVOCATION. load_synthetic_data holds the whole corpus in RAM; at 1.33M samples
+  # that is ~44 GB, over this job's --mem. Filtering to a single protocol costs ~15 GB, and the
+  # three experts are independent, so nothing is lost. The router needs a MIXED sample and gets its
+  # own capped pass afterwards.
+  for PROTO in LTE WiFi 5G; do
+    if [ -f "$WDIR/${PROTO}_expert.pth" ]; then
+      echo "## $ARM p$PATCH s$SEED $PROTO already done — skip" | tee -a "$LOG"; continue
+    fi
+    echo "--- expert $PROTO ---" | tee -a "$LOG"
+    $PY spectro/scripts/spectro_pretrain_real.py "${PRE_ARGS[@]}" --protocols "$PROTO" \
+      --wandb --wandb-project "$WANDB_PROJECT" \
+      --run-name "study-pretrain-${ARM}-p${PATCH}-s${SEED}-${PROTO}" 2>&1 | tee -a "$LOG"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "EXPERT FAILED ($PROTO)" | tee -a "$LOG"; exit 1; }
+  done
+  if [ ! -f "$WDIR/router.pth" ]; then
+    echo "--- router ---" | tee -a "$LOG"
+    $PY spectro/scripts/spectro_pretrain_real.py "${PRE_ARGS[@]}" --router-only \
+      --router-epochs "$ROUTER_EPOCHS" 2>&1 | tee -a "$LOG"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "ROUTER FAILED" | tee -a "$LOG"; exit 1; }
+  fi
+else
+  $PY spectro/scripts/spectro_pretrain_real.py "${PRE_ARGS[@]}" --router-epochs "$ROUTER_EPOCHS" \
+    --wandb --wandb-project "$WANDB_PROJECT" \
+    --run-name "study-pretrain-${ARM}-p${PATCH}-s${SEED}" 2>&1 | tee -a "$LOG"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "PRETRAIN FAILED" | tee -a "$LOG"; exit 1; }
+fi
 
 done3 "$WDIR" || { echo "PRETRAIN FAILED (no 3 experts + router in $WDIR)" | tee -a "$LOG"; exit 1; }
 echo "=== 10 DONE idx=$IDX ($ARM p$PATCH s$SEED) $(date) ===" | tee -a "$LOG"

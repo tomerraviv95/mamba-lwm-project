@@ -55,6 +55,31 @@ def _patchify_2d(spec: np.ndarray, patch: int) -> np.ndarray:
     return reshaped.transpose(0, 2, 1, 3).reshape(-1, patch * patch)
 
 
+# --- corpus-level normalization guard -------------------------------------------------------
+# The single-carrier corpus is stored ALREADY normalized with corpus-level dB statistics (the
+# paper's "normalize with pretrained statistics"). Re-applying a per-sample z-score on top of that
+# divides out each sample's dB variance -- which IS the statistic that separates modulation orders
+# (BPSK 0.44 / QPSK 0.24 / QAM16 0.51 / QAM64 0.58 / QAM256 0.59) -- and couples what survives to
+# SNR. Every call site below passes ``normalize=True`` hardcoded, so rather than edit 8 of them and
+# risk missing one, ``load_synthetic_data`` sets this flag from the corpus manifest and it turns
+# those into no-ops.
+_PRENORMALIZED = False
+
+
+def set_corpus_prenormalized(flag: bool, source: str = "") -> None:
+    """Declare that the loaded corpus is already normalized (see ``_PRENORMALIZED``)."""
+    global _PRENORMALIZED
+    if _PRENORMALIZED != flag:
+        print(f"[patchify] corpus_prenormalized={flag}"
+              f"{f' (from {source})' if source else ''} -> per-sample z-score "
+              f"{'DISABLED' if flag else 'enabled'}")
+    _PRENORMALIZED = flag
+
+
+def corpus_prenormalized() -> bool:
+    return _PRENORMALIZED
+
+
 def spectrogram_patchify(specs, patch: int = PATCH, normalize: bool = True) -> np.ndarray:
     """Turn spectrograms into 4x4 patch tokens (single- or multi-channel).
 
@@ -78,7 +103,7 @@ def spectrogram_patchify(specs, patch: int = PATCH, normalize: bool = True) -> n
     # now (N, C, H, W) with C in {1, 2}
     out = []
     for spec in specs:                  # spec: (C,H,W)
-        if normalize:
+        if normalize and not _PRENORMALIZED:
             mean = float(spec.mean()); std = float(spec.std())
             spec = (spec - mean) / (std if abs(std) > 1e-6 else 1e-6)
         chans = [_patchify_2d(ch, patch) for ch in spec]          # each (n_patches, patch*patch)
@@ -150,7 +175,7 @@ def time_column_positions(side: int, frac: float, rng: np.random.Generator) -> n
 
 
 def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch: int = PATCH,
-                         mask_mode: str = "random", half: bool = False):
+                         mask_mode: str = "random", half: bool = False, index=None):
     """Build stacked (input_ids, masked_tokens, masked_pos) tensors for MLM pretraining.
 
     All 128x128 spectrograms share the same n_patches and a constant n_masks (random mode) or a
@@ -160,6 +185,9 @@ def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch
     Args:
         mask_mode: 'random' (BERT 4x4-patch masking, default) or 'time_col' (mask whole time columns
             of the patch grid -> temporal/Doppler pretext, see ``time_column_positions``).
+        index: optional row indices into ``specs``. Slicing is then done PER CHUNK, so the caller
+            never materializes ``specs[index]`` -- that copy is 4.35 GB for one protocol of the 398k
+            corpus, on top of the 13 GB corpus itself.
         half: store ``input_ids``/``masked_tokens`` as float16 (cast to float32 at use). Halves the
             RAM footprint — needed for large corpora (~40k samples/expert would otherwise peak >25 GB).
             The random-mode path also preallocates and uses ``torch.from_numpy`` (zero-copy) to avoid
@@ -169,8 +197,14 @@ def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch
         ``(input_ids, masked_tokens, masked_pos)`` torch tensors; for patch 4: (N,1025,16),
         (N,n_masks,16), (N,n_masks).
     """
-    patches = spectrogram_patchify(specs, patch=patch, normalize=True)
-    n_patches = patches.shape[1]
+    # Geometry from a single sample, so the full float32 patch array is never materialized.
+    # spectrogram_patchify returns FLOAT32; at 133k samples x 257 tokens x 64 that is 8.75 GB of
+    # transient on top of the corpus itself, which is what OOMs a 25 GB box on the 398k corpus.
+    # We chunk instead and write straight into the preallocated (fp16 when half) outputs.
+    idx = None if index is None else np.asarray(index)
+    probe = spectrogram_patchify(specs[:1] if idx is None else specs[idx[:1]],
+                                 patch=patch, normalize=True)
+    n_patches, elem = probe.shape[1], probe.shape[2]
     n_masks = max(1, int(mask_percent * n_patches))
     rng = np.random.default_rng(seed)
     side = int(round(n_patches ** 0.5))
@@ -178,14 +212,20 @@ def build_masked_tensors(specs, mask_percent: float = 0.6, seed: int = 42, patch
         raise ValueError(f"time_col masking needs a square patch grid; got n_patches={n_patches}")
 
     store = np.float16 if half else np.float32
-    if mask_mode == "random":                        # common path: preallocate + zero-copy (low peak)
-        n, elem = patches.shape[0], patches.shape[2]
+    if mask_mode == "random":                        # common path: preallocate + chunked (low peak)
+        n = len(specs) if idx is None else len(idx)
         ids = np.empty((n, n_patches + 1, elem), dtype=store)
         toks = np.empty((n, n_masks, elem), dtype=store)
         pos = np.empty((n, n_masks), dtype=np.int64)
-        for i in range(n):
-            a, b, c = make_sample_spectro(patches[i], n_masks, mask=True, rng=rng, masked_pos=None)
-            ids[i], toks[i], pos[i] = a, b, c
+        CH = 4096
+        for s0 in range(0, n, CH):
+            s1 = min(s0 + CH, n)
+            sl = specs[s0:s1] if idx is None else specs[idx[s0:s1]]
+            pch = spectrogram_patchify(sl, patch=patch, normalize=True)
+            for i in range(s1 - s0):
+                a, b, c = make_sample_spectro(pch[i], n_masks, mask=True, rng=rng, masked_pos=None)
+                ids[s0 + i], toks[s0 + i], pos[s0 + i] = a, b, c
+            del pch
         return torch.from_numpy(ids), torch.from_numpy(toks), torch.from_numpy(pos)
 
     ids, toks, pos = [], [], []                      # time_col path (rare pretext): keep list build

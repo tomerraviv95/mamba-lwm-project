@@ -40,4 +40,4 @@ else
   echo "== [2/2] no CSVs under $STUDY_CSV_DIR/study_csv*/ — did 11_downstream_grid run? — skip =="
 fi
 
-echo "study publish done ($(date)). Plot locally: python spectro/scripts/plot_from_csv.py --hf-repo $HF_STUDY_REPO --variant $STUDY_HEAD"
+echo "study publish done ($(date)). Plot locally: python spectro/scripts/plot_from_csv.py --hf-repo $HF_STUDY_REPO --variant ${STUDY_VARIANT:-$STUDY_HEAD}"

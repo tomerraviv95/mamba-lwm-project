@@ -37,15 +37,17 @@ class lwm_mamba_spectro(nn.Module):
     """
 
     def __init__(self, element_length=16, d_model=128, n_layers=12, max_len=1025,
-                 d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True, use_fast_path=True):
+                 d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True, use_fast_path=True,
+                 second_order_embed=False):
         super().__init__()
         self.element_length = element_length
+        self.second_order_embed = second_order_embed
         self.d_model = d_model
         self.n_layers = n_layers
         self.max_len = max_len
         self.bidirectional = bidirectional
 
-        self.proj = nn.Linear(element_length, d_model)
+        self.proj = nn.Linear(element_length * (2 if second_order_embed else 1), d_model)
         self.input_norm = nn.LayerNorm(d_model)
 
         # use_fast_path=False (downstream LoRA finetuning) forces the SSM slow path so weight-
@@ -64,7 +66,10 @@ class lwm_mamba_spectro(nn.Module):
         self.decoder_bias = nn.Parameter(torch.zeros(element_length))
 
     def forward(self, input_ids, masked_pos=None):
-        output = self.proj(input_ids.float())
+        x = input_ids.float()
+        if self.second_order_embed:
+            x = torch.cat([x, x * x], dim=-1)
+        output = self.proj(x)
         output = self.input_norm(output)
         for layer in self.layers:
             output = layer(output)

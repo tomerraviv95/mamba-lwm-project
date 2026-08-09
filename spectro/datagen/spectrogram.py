@@ -68,6 +68,73 @@ def iq_batch_to_spectrogram(iq: torch.Tensor, n_fft: int = N_FFT, out_size: int 
     return db.to(torch.float16)                                    # (n,1,out,out)
 
 
+# Corpus-level dB normalization constants for ``norm='global'``.
+# Per-sample z-scoring divides each spectrogram by the std of its own dB values -- but envelope
+# variance IS the statistic that separates modulation orders (BPSK 0.44 / QPSK 0.24 / QAM16 0.51 /
+# QAM64 0.58 / QAM256 0.59 pre-channel), so per-sample normalization deletes the modulation cue and
+# couples what remains to SNR. The paper normalizes "with pretrained statistics", i.e. corpus-level.
+# Measured over the single-carrier corpus (all 3 protocols x 5 mods x 7 SNRs x 3 mobilities,
+# DeepMIMO channels): mean -4.49 dB, std 13.34 dB, 1st/99th pct -39.2/+16.4 dB. Recalibrate with
+# `--sc-norm none` + a few hundred samples if the numerology or SNR grid changes.
+SC_DB_MEAN = -4.5
+SC_DB_STD = 13.3
+
+
+def sc_power_spectrogram(iq: torch.Tensor, n_fft: int = OUT_SIZE, win_length: int = 8,
+                         out_size: int = OUT_SIZE, norm: str = 'global',
+                         db_mean: float = SC_DB_MEAN, db_std: float = SC_DB_STD,
+                         eps: float = 1e-12) -> torch.Tensor:
+    """Single-carrier power spectrogram, matching LWM-Spectro eq. (7)-(10).
+
+    ``P[t,k] = |Y[t,k]|^2`` -> ``10*log10`` -> per-sample normalize -> ``(n, 1, 128, 128)``.
+
+    Two deliberate differences from every other function in this module:
+
+    1. **No resize.** The hop is chosen so the STFT produces exactly ``out_size`` frames and
+       ``n_fft == out_size`` gives exactly ``out_size`` frequency bins, so the spectrogram is
+       natively 128x128. The nearest/bilinear ``F.interpolate`` used by the OFDM paths was
+       measured to duplicate 25% of LTE rows and 50% of WiFi columns (injecting a spurious +0.24
+       lag-1 autocorrelation into *static* samples, contaminating the Doppler cue) while
+       discarding 7/8 of LTE's resource elements.
+    2. **Short analysis window, zero-padded to ``n_fft``.** ``win_length`` spans only a few symbol
+       periods, so each frame resolves the *instantaneous* envelope rather than converging to the
+       average RRC power spectrum (which is identical for every constellation). This is what keeps
+       modulation visible in a magnitude representation. Zero-padding to ``n_fft`` still yields the
+       full ``out_size`` frequency bins.
+
+    ``win_length`` therefore trades modulation visibility (short) against frequency resolution
+    (long) — see ``sweep_sc_config.py`` for the measurement that picked the default.
+
+    ``norm``: ``'global'`` (default) subtracts fixed corpus-level dB statistics, preserving both
+    absolute power (the SNR cue) and per-sample dB variance (the modulation cue). ``'sample'`` is
+    the legacy per-sample z-score, which deletes both. ``'none'`` returns raw dB.
+    """
+    if not torch.is_complex(iq):
+        iq = iq.to(torch.complex64)
+    if iq.dim() == 1:
+        iq = iq[None]
+    n_samples = iq.shape[-1]
+    hop = max(1, (n_samples - n_fft) // (out_size - 1))
+    window = torch.hann_window(win_length, device=iq.device)
+    spec = torch.stft(iq, n_fft=n_fft, hop_length=hop, win_length=win_length, window=window,
+                      center=False, onesided=False, return_complex=True)   # (n, n_fft, frames)
+    spec = spec[..., :out_size]
+    if spec.shape[-1] < out_size:                       # pad-repeat only if the burst was short
+        spec = torch.cat([spec, spec[..., -1:].expand(-1, -1, out_size - spec.shape[-1])], dim=-1)
+    spec = torch.fft.fftshift(spec, dim=1)              # DC to the centre bin
+    p_db = 10.0 * torch.log10(spec.abs().pow(2) + eps)  # eq. (9) + log scaling
+    p_db = p_db.unsqueeze(1)                            # (n, 1, K, T)
+    if norm == 'global':
+        p_db = (p_db - db_mean) / db_std
+    elif norm == 'sample':
+        mean = p_db.mean(dim=(1, 2, 3), keepdim=True)
+        std = torch.clamp(p_db.std(dim=(1, 2, 3), keepdim=True), min=1e-6)
+        p_db = (p_db - mean) / std
+    elif norm != 'none':
+        raise ValueError(f"norm must be one of global|sample|none, got {norm!r}")
+    return p_db.to(torch.float16)                       # (n, 1, out, out)
+
+
 def grid_mag_to_spectrogram(grid_mag: torch.Tensor, out_size: int = OUT_SIZE,
                             normalize: bool = True) -> torch.Tensor:
     """Received resource-grid magnitude -> (n,1,out,out) float16 dB z-scored spectrogram.

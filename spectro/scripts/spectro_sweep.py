@@ -68,7 +68,8 @@ def _build_head(features: torch.Tensor, n_classes: int, backbone=None):
     if backbone is not None:
         return ClassificationHead(backbone.feat_dim, n_classes)
     if features.dim() == 3:                       # (N, T, d) token sequence -> paper residual CNN head
-        return Conv1dHead(features.shape[2], n_classes)
+        import spectro_train_heads_config as _cfg
+        return Conv1dHead(features.shape[2], n_classes, second_order=_cfg.HEAD_SECOND_ORDER)
     return ClassificationHead(features.shape[1], n_classes)
 
 

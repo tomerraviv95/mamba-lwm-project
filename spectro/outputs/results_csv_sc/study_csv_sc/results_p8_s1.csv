@@ -1,0 +1,193 @@
+patch,seed,arm,arm_label,eval,task,per_class,n_samples,macro_f1,accuracy
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,2,10,0.247055,0.247599
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,5,25,0.265684,0.270651
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,10,50,0.103485,0.181857
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,20,100,0.130279,0.198292
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,50,250,0.351723,0.34365
+8,1,deepcnn,DeepCNN (end-to-end),seen,modulation,100,500,0.37462,0.364141
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,2,10,0.212691,0.21857
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,5,25,0.229564,0.23031
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,10,50,0.265159,0.260192
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,20,100,0.319984,0.311206
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,50,250,0.307576,0.299466
+8,1,mamba,LWM Mamba (pretrained),seen,modulation,100,500,0.329117,0.330416
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,2,10,0.222793,0.229029
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,5,25,0.269198,0.264034
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,10,50,0.283196,0.278975
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,20,100,0.320127,0.315048
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,50,250,0.32885,0.331483
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,modulation,100,500,0.364866,0.357311
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,2,10,0.180764,0.191249
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,5,25,0.186724,0.20064
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,10,50,0.189039,0.195091
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,20,100,0.199794,0.20555
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,50,250,0.201776,0.204909
+8,1,random_init_mambarand,Mamba (random init),seen,modulation,100,500,0.20615,0.20619
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,2,10,0.187374,0.195945
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,5,25,0.189906,0.192102
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,10,50,0.188098,0.196158
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,20,100,0.190518,0.194023
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,50,250,0.192072,0.199787
+8,1,random_init_tfrand,Transformer (random init),seen,modulation,100,500,0.229089,0.230736
+8,1,raw,raw patches,seen,modulation,2,10,0.197574,0.197652
+8,1,raw,raw patches,seen,modulation,5,25,0.196781,0.197225
+8,1,raw,raw patches,seen,modulation,10,50,0.211969,0.216649
+8,1,raw,raw patches,seen,modulation,20,100,0.216833,0.219851
+8,1,raw,raw patches,seen,modulation,50,250,0.233195,0.235005
+8,1,raw,raw patches,seen,modulation,100,500,0.251185,0.252721
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,2,10,0.20791,0.212166
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,5,25,0.229232,0.233298
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,10,50,0.2765,0.273212
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,20,100,0.31174,0.306083
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,50,250,0.331941,0.324653
+8,1,resnet18,ResNet-18 (frozen),seen,modulation,100,500,0.331432,0.341515
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,2,10,0.189052,0.194877
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,5,25,0.203311,0.205763
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,10,50,0.187243,0.190181
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,20,100,0.200065,0.205977
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,50,250,0.199112,0.203415
+8,1,transformer_synth,LWM Transformer (pretrained),seen,modulation,100,500,0.211911,0.213234
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,2,42,0.074845,0.088367
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,5,105,0.07291,0.097759
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,10,210,0.115615,0.128282
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,20,420,0.144606,0.152615
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,50,1050,0.178119,0.17524
+8,1,deepcnn,DeepCNN (end-to-end),seen,snr_doppler,100,2100,0.215525,0.220491
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,2,42,0.06498,0.071718
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,5,105,0.090469,0.092423
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,10,210,0.125587,0.126361
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,20,420,0.164528,0.164568
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,50,1050,0.21426,0.210459
+8,1,mamba,LWM Mamba (pretrained),seen,snr_doppler,100,2100,0.294688,0.300107
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,2,42,0.102468,0.111206
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,5,105,0.144407,0.150267
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,10,210,0.172801,0.175667
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,20,420,0.187748,0.194877
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,50,1050,0.244879,0.248239
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",seen,snr_doppler,100,2100,0.300529,0.301601
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,2,42,0.043132,0.060192
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,5,105,0.068171,0.075987
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,10,210,0.079503,0.083671
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,20,420,0.089855,0.093276
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,50,1050,0.124901,0.128922
+8,1,random_init_mambarand,Mamba (random init),seen,snr_doppler,100,2100,0.159336,0.179296
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,2,42,0.064999,0.070011
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,5,105,0.101835,0.102028
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,10,210,0.124217,0.127428
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,20,420,0.1489,0.157311
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,50,1050,0.275843,0.272572
+8,1,random_init_tfrand,Transformer (random init),seen,snr_doppler,100,2100,0.34846,0.345144
+8,1,raw,raw patches,seen,snr_doppler,2,42,0.09177,0.105656
+8,1,raw,raw patches,seen,snr_doppler,5,105,0.111332,0.128495
+8,1,raw,raw patches,seen,snr_doppler,10,210,0.148837,0.150907
+8,1,raw,raw patches,seen,snr_doppler,20,420,0.193894,0.197225
+8,1,raw,raw patches,seen,snr_doppler,50,1050,0.261624,0.260192
+8,1,raw,raw patches,seen,snr_doppler,100,2100,0.292368,0.304162
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,2,42,0.088523,0.096692
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,5,105,0.120157,0.126788
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,10,210,0.151529,0.152188
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,20,420,0.177564,0.176521
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,50,1050,0.203326,0.204056
+8,1,resnet18,ResNet-18 (frozen),seen,snr_doppler,100,2100,0.225299,0.223906
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,2,42,0.07952,0.08111
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,5,105,0.129878,0.133191
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,10,210,0.192553,0.195518
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,20,420,0.272678,0.271932
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,50,1050,0.37663,0.375027
+8,1,transformer_synth,LWM Transformer (pretrained),seen,snr_doppler,100,2100,0.419817,0.417289
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,2,10,0.157982,0.173189
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,5,25,0.244269,0.248127
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,10,50,0.244184,0.25229
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,20,100,0.244303,0.262281
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,50,250,0.30817,0.313905
+8,1,deepcnn,DeepCNN (end-to-end),unseen,modulation,100,500,0.341623,0.338052
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,2,10,0.200537,0.202331
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,5,25,0.214515,0.22398
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,10,50,0.225427,0.225645
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,20,100,0.23253,0.230641
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,50,250,0.276522,0.269775
+8,1,mamba,LWM Mamba (pretrained),unseen,modulation,100,500,0.295835,0.294754
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,2,10,0.19788,0.218152
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,5,25,0.213563,0.223147
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,10,50,0.242862,0.243131
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,20,100,0.267403,0.263114
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,50,250,0.268887,0.268943
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,modulation,100,500,0.321797,0.319734
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,2,10,0.200601,0.20816
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,5,25,0.203804,0.21149
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,10,50,0.192482,0.196503
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,20,100,0.200074,0.202331
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,50,250,0.18916,0.194005
+8,1,random_init_mambarand,Mamba (random init),unseen,modulation,100,500,0.19025,0.218152
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,2,10,0.186672,0.189842
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,5,25,0.195322,0.199833
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,10,50,0.190417,0.198168
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,20,100,0.19538,0.20816
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,50,250,0.190267,0.191507
+8,1,random_init_tfrand,Transformer (random init),unseen,modulation,100,500,0.18847,0.19234
+8,1,raw,raw patches,unseen,modulation,2,10,0.174277,0.196503
+8,1,raw,raw patches,unseen,modulation,5,25,0.186666,0.196503
+8,1,raw,raw patches,unseen,modulation,10,50,0.190644,0.19234
+8,1,raw,raw patches,unseen,modulation,20,100,0.180922,0.183181
+8,1,raw,raw patches,unseen,modulation,50,250,0.226552,0.228976
+8,1,raw,raw patches,unseen,modulation,100,500,0.206231,0.226478
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,2,10,0.190053,0.190674
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,5,25,0.240564,0.241465
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,10,50,0.283694,0.273106
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,20,100,0.285891,0.281432
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,50,250,0.278852,0.273106
+8,1,resnet18,ResNet-18 (frozen),unseen,modulation,100,500,0.293526,0.287261
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,2,10,0.184396,0.186511
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,5,25,0.203726,0.205662
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,10,50,0.200761,0.202331
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,20,100,0.19484,0.199001
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,50,250,0.219464,0.219817
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,modulation,100,500,0.18576,0.204829
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,2,42,0.092361,0.111574
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,5,105,0.02234,0.086595
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,10,210,0.106084,0.114904
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,20,420,0.1089,0.120733
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,50,1050,0.154309,0.159867
+8,1,deepcnn,DeepCNN (end-to-end),unseen,snr_doppler,100,2100,0.215948,0.223147
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,2,42,0.075043,0.084929
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,5,105,0.085558,0.101582
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,10,210,0.104765,0.11657
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,20,420,0.141459,0.146545
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,50,1050,0.211746,0.220649
+8,1,mamba,LWM Mamba (pretrained),unseen,snr_doppler,100,2100,0.273891,0.288093
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,2,42,0.118,0.134055
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,5,105,0.158305,0.162365
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,10,210,0.13128,0.159034
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,20,420,0.179913,0.17985
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,50,1050,0.21201,0.218152
+8,1,mobilenet_v3_small,"MobileNetV3-S (frozen, param-matched)",unseen,snr_doppler,100,2100,0.311521,0.309742
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,2,42,0.05958,0.067444
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,5,105,0.0535,0.059117
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,10,210,0.074797,0.082431
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,20,420,0.073195,0.084929
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,50,1050,0.108098,0.138218
+8,1,random_init_mambarand,Mamba (random init),unseen,snr_doppler,100,2100,0.143524,0.150708
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,2,42,0.069816,0.081599
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,5,105,0.090011,0.094088
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,10,210,0.098153,0.099917
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,20,420,0.150332,0.157369
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,50,1050,0.238796,0.246461
+8,1,random_init_tfrand,Transformer (random init),unseen,snr_doppler,100,2100,0.330056,0.329725
+8,1,raw,raw patches,unseen,snr_doppler,2,42,0.077579,0.09159
+8,1,raw,raw patches,unseen,snr_doppler,5,105,0.1325,0.144047
+8,1,raw,raw patches,unseen,snr_doppler,10,210,0.148527,0.159867
+8,1,raw,raw patches,unseen,snr_doppler,20,420,0.155006,0.173189
+8,1,raw,raw patches,unseen,snr_doppler,50,1050,0.260068,0.263114
+8,1,raw,raw patches,unseen,snr_doppler,100,2100,0.270847,0.278102
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,2,42,0.12509,0.128226
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,5,105,0.10338,0.115737
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,10,210,0.137328,0.139883
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,20,420,0.157907,0.162365
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,50,1050,0.168535,0.189009
+8,1,resnet18,ResNet-18 (frozen),unseen,snr_doppler,100,2100,0.211267,0.22398
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,2,42,0.108418,0.109908
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,5,105,0.141305,0.138218
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,10,210,0.174351,0.169026
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,20,420,0.273135,0.275604
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,50,1050,0.379804,0.376353
+8,1,transformer_synth,LWM Transformer (pretrained),unseen,snr_doppler,100,2100,0.408958,0.406328

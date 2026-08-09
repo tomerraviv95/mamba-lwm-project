@@ -92,14 +92,23 @@ class ResNet18FT(nn.Module):
 
 
 def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torch.Tensor:
-    """Fixed seeded Gaussian random projection -> (N, out_dim). Only shrinks features WIDER than
-    out_dim; returns the input unchanged otherwise. Scaled by 1/sqrt(out_dim) so it approximately
-    preserves pairwise distances (Johnson-Lindenstrauss), giving every arm an equal-width feature
-    for a fair head comparison (e.g. ResNet-50 2048-d / ResNet-18 512-d -> 256-d like our MoE arms)."""
-    if features.shape[1] <= out_dim:
+    """Fixed seeded Gaussian random projection to ``out_dim`` on the LAST axis.
+
+    Handles both pooled ``(N, D)`` and token-sequence ``(N, T, D)`` features; only shrinks widths
+    ABOVE out_dim, and returns the input unchanged otherwise. Scaled by 1/sqrt(out_dim) so pairwise
+    distances are approximately preserved (Johnson-Lindenstrauss).
+
+    Why this matters: the shared head is ``Conv1d(d_model, 128, k=1) -> blocks -> pool``, so its
+    parameter count scales with the backbone's feature WIDTH. Measured on the patch-8 run, the
+    frozen ImageNet arms hand the head 512/576-d tokens and get a 330-347k head, while the LWM arms
+    hand it 128-d tokens and get a 232k head -- a ~1.4-1.5x capacity advantage that has nothing to
+    do with representation quality. Equalizing the width isolates "are these features better?" from
+    "was this arm given a bigger head?".
+    """
+    if features.shape[-1] <= out_dim:
         return features
     g = torch.Generator().manual_seed(seed)
-    W = torch.randn(features.shape[1], out_dim, generator=g) / (out_dim ** 0.5)
+    W = torch.randn(features.shape[-1], out_dim, generator=g) / (out_dim ** 0.5)
     return features.float() @ W
 
 
@@ -167,9 +176,13 @@ def _imagenet_features(data, model_name, device, batch=64, as_sequence=False) ->
 
 
 def _random_init_features(data, device, arch='transformer', pool='mean', seed=42, patch=4,
-                          as_sequence=False) -> torch.Tensor:
-    """Untrained MoE (random weights) features, oracle routing -> isolates the pretraining LIFT
-    (random-init backbone is the no-pretraining-but-same-architecture baseline).
+                          as_sequence=False, routing='oracle') -> torch.Tensor:
+    """Untrained MoE (random weights) features -> isolates the pretraining LIFT.
+
+    ``routing`` MUST match what the pretrained arms use. It was hardcoded to 'oracle' while the
+    pretrained arms defaulted to the learned router, so the control was handed ground-truth
+    protocol labels the treatment never got -- which is a plausible part of why random_init beat
+    the pretrained mamba on p4/seen snr_doppler (.231 vs .211 @2/cls).
     ``as_sequence`` -> (N, T, d) token sequences for the CNN head; else pooled (N, d)."""
     torch.manual_seed(seed)
     channels = data.spectrograms.shape[1] if data.spectrograms.ndim == 4 else 1
@@ -177,7 +190,7 @@ def _random_init_features(data, device, arch='transformer', pool='mean', seed=42
     moe = SpectroMoE(PROTOCOLS, d_model=128, arch=arch, n_layers=12, pool=pool, patch=patch,
                      element_length=geom['element_length'], max_len=geom['max_len'], in_channels=channels)
     fn = moe.extract_sequences if as_sequence else moe.extract_embeddings
-    return fn(data.spectrograms, routing='oracle', protocol_idx=data.protocol, device=device)
+    return fn(data.spectrograms, routing=routing, protocol_idx=data.protocol, device=device)
 
 
 def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffix='',
@@ -205,9 +218,14 @@ def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffi
     element_length = sample_expert.get('element_length', geom['element_length'])
     max_len = sample_expert.get('max_len', geom['max_len'])
     in_channels = max(1, element_length // (patch * patch))     # 2 for grid_stft/complex checkpoints
+    # The [x, x^2] token projection changes proj's weight SHAPE, so a mismatch would raise here
+    # rather than silently produce garbage -- but read it from the checkpoint anyway so old
+    # (linear-embedding) checkpoints keep loading.
+    so_embed = bool(sample_expert.get('second_order_embed', False))
 
     moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool=pool, patch=patch,
-                     element_length=element_length, max_len=max_len, in_channels=in_channels)
+                     element_length=element_length, max_len=max_len, in_channels=in_channels,
+                     second_order_embed=so_embed)
     for proto in PROTOCOLS:
         ckpt = torch.load(os.path.join(wdir, f'{proto}_expert.pth'),
                           map_location='cpu', weights_only=False)
@@ -226,6 +244,13 @@ def main():
     ap.add_argument('--head', choices=['cnn1d', 'mlp'], default='cnn1d',
                     help="downstream head for the MoE arms: paper residual 1-D CNN over the token "
                          "sequence (cnn1d, default) or a pooled-feature MLP probe (mlp).")
+    ap.add_argument('--head-variant', choices=['second_order', 'paper'], default='second_order',
+                    help="Conv1dHead readout. 'second_order' (default) concatenates [x, x^2] before "
+                         "the 1x1 projection and pools mean++std over tokens, so the head can form "
+                         "the envelope VARIANCE that carries modulation. 'paper' is the published "
+                         "linear-projection + global-average-pool head (ablation only: it cannot "
+                         "express a variance, and measurably reads chance on modulation even when "
+                         "the features hold the full input).")
     ap.add_argument('--routing', choices=['router', 'oracle'], default='router',
                     help='routing strategy for the synthetic-pretrained MoE arms.')
     ap.add_argument('--moe-arch', choices=['mamba', 'transformer'], default='mamba',
@@ -267,6 +292,9 @@ def main():
                     help='random-project features WIDER than this down to it (fair equal-width head '
                          'comparison; e.g. 256 shrinks ResNet 512/2048-d, leaves our 256-d arms as-is).')
     args = ap.parse_args()
+    # Set once, before any head is built, so every arm in this run uses the SAME readout.
+    from spectro_train_heads_config import set_head_second_order
+    set_head_second_order(args.head_variant == 'second_order')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if args.synth_dir:
@@ -296,14 +324,15 @@ def main():
         embed_fn = lambda bb, x: bb(x)                             # noqa: E731
     elif args.arm == 'random_init':
         features = _random_init_features(data, device, arch=args.moe_arch, seed=args.seed,
-                                         patch=args.patch, pool=args.pool, as_sequence=seq)
+                                         patch=args.patch, pool=args.pool, as_sequence=seq,
+                                         routing=args.routing)
     elif args.arm in _MOE_ARMS:
         arch = _MOE_ARMS[args.arm]
         features = _moe_features(data, device, args.routing, arch, args.patch, pool=args.pool,
                                  weights_suffix=args.weights_suffix, as_sequence=seq)
     else:
         features = _raw_features(data, patch=args.patch, as_sequence=seq)
-    if args.project_dim and features.dim() == 2:   # equal-width head comparison (pooled features only)
+    if args.project_dim:                          # equal-width head comparison (pooled OR sequence)
         pre = features.shape[1]
         features = _random_project(features, args.project_dim, seed=args.seed)
         if features.shape[1] != pre:

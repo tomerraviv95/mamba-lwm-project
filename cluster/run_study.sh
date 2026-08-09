@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # LOGIN-NODE orchestrator (STUDY): submit the whole multi-seed / multi-patch grid in one shot.
 #   1) 10_pretrain_grid  (array over arch x patch x seed)
-#   2) 11_downstream_grid (array over patch x seed), dependency=afterok on (1)
+#   2) 11_downstream_grid (array over patch x seed), dependency=afterANY on (1).
+#      afterok would cancel EVERY downstream task if a single pretrain array task times out
+#      (the transformer at patch 4 exceeds the 24h wall) -- including combos that finished.
+#      The per-combo checkpoint guard in 11_* is the real gate.
 # Then run cluster/12_publish_study.sh MANUALLY once both arrays finish (login-node network I/O).
 #
 #   bash cluster/run_study.sh
@@ -28,7 +31,7 @@ echo "grid: patches=[$PATCHES] seeds=[$STUDY_SEEDS] -> pretrain array 0-$((N_PRE
 
 JID_PRE=$(sbatch --parsable --export=ALL --array=0-$((N_PRE-1)) cluster/10_pretrain_grid.sbatch)
 echo "submitted 10_pretrain_grid  -> job $JID_PRE"
-JID_DOWN=$(sbatch --parsable --export=ALL --array=0-$((N_DOWN-1)) --dependency=afterok:"$JID_PRE" cluster/11_downstream_grid.sbatch)
+JID_DOWN=$(sbatch --parsable --export=ALL --array=0-$((N_DOWN-1)) --dependency=afterany:"$JID_PRE" cluster/11_downstream_grid.sbatch)
 echo "submitted 11_downstream_grid -> job $JID_DOWN (starts after $JID_PRE completes OK)"
 
 cat <<EOF
