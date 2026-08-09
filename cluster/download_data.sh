@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # STEP 1 — pull the paper-aligned data from HF. RUN THIS ON THE LOGIN NODE (it has internet;
-# compute nodes may not, and the xet backend is disabled so this uses classic HTTP).
+# compute nodes may not). Xet IS disabled (hf_download_sc.py sets HF_HUB_DISABLE_XET before importing
+# huggingface_hub) -- hf-xet chunks in memory and killed a 25 GB host twice on these shards.
 #
 #     bash cluster/download_data.sh            # normal (skips dirs that already verify)
 #     FORCE=1 bash cluster/download_data.sh    # re-download everything
@@ -66,15 +67,21 @@ PY
 }
 
 # fetch <repo> <only> <corpus_dir> <eval_dir> <verify_dir> : download, then verify+force-retry once.
+# hf_download_sc.py (not hf_download_gridstft.py): retries with backoff, is resumable, writes
+# straight to the target with local_dir= (the old path cached THEN copied -> 88 GB for a 44 GB
+# corpus, enough to blow a login-node quota), and disables Xet. It is already idempotent, so the
+# retry below only fires if verification still fails afterwards.
 fetch() {
   local repo="$1" only="$2" cdir="$3" edir="$4" vdir="$5"
   local force=""; [ "${FORCE:-0}" = 1 ] && force="--force"
-  $PY spectro/scripts/hf_download_gridstft.py --repo "$repo" --only "$only" \
-      --corpus-dir "$cdir" --eval-dir "$edir" $force
+  local args=()
+  [ "$only" = both ] && args=(--corpus-dir "$cdir" --eval-dir "$edir")
+  [ "$only" = corpus ] && args=(--corpus-dir "$cdir")
+  [ "$only" = eval ] && args=(--eval-dir "$edir")
+  $PY spectro/scripts/hf_download_sc.py --repo "$repo" "${args[@]}" $force
   if ! verify_dir "$vdir" "$repo" "${6:-corpus}"; then
     echo "  !! $vdir failed verification — re-fetching with --force ..."
-    $PY spectro/scripts/hf_download_gridstft.py --repo "$repo" --only "$only" \
-        --corpus-dir "$cdir" --eval-dir "$edir" --force
+    $PY spectro/scripts/hf_download_sc.py --repo "$repo" "${args[@]}" --force
   fi
 }
 
