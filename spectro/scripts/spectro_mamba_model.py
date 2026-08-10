@@ -38,7 +38,7 @@ class lwm_mamba_spectro(nn.Module):
 
     def __init__(self, element_length=16, d_model=128, n_layers=12, max_len=1025,
                  d_state=16, d_conv=4, expand=2, dropout=0.1, bidirectional=True, use_fast_path=True,
-                 second_order_embed=False):
+                 second_order_embed=False, conv_stem=False, patch=None):
         super().__init__()
         self.element_length = element_length
         self.second_order_embed = second_order_embed
@@ -47,7 +47,12 @@ class lwm_mamba_spectro(nn.Module):
         self.max_len = max_len
         self.bidirectional = bidirectional
 
-        self.proj = nn.Linear(element_length * (2 if second_order_embed else 1), d_model)
+        if conv_stem:
+            from spectro_backbones import ConvStem      # per-patch 3x3 conv + GELU tokenizer
+            self.proj = ConvStem(element_length, d_model, patch)
+        else:
+            self.proj = nn.Linear(element_length * (2 if second_order_embed else 1), d_model)
+        self.conv_stem = conv_stem
         self.input_norm = nn.LayerNorm(d_model)
 
         # use_fast_path=False (downstream LoRA finetuning) forces the SSM slow path so weight-
@@ -67,7 +72,7 @@ class lwm_mamba_spectro(nn.Module):
 
     def forward(self, input_ids, masked_pos=None):
         x = input_ids.float()
-        if self.second_order_embed:
+        if self.second_order_embed and not self.conv_stem:
             x = torch.cat([x, x * x], dim=-1)
         output = self.proj(x)
         output = self.input_norm(output)

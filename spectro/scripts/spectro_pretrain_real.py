@@ -414,8 +414,9 @@ def main():
                                                      demo=demo, eval_task=args.eval_task, device=device,
                                                      args=args, wandb_run=wandb_run)
         _so = os.environ.get('SPECTRO_SO_EMBED', '1') not in ('0', 'false', 'False')
+        _cs = os.environ.get('SPECTRO_CONV_STEM', '0') not in ('0', 'false', 'False')
         torch.save({'state_dict': state, 'arch': args.arch, 'd_model': args.d_model,
-                    'second_order_embed': _so,
+                    'second_order_embed': _so, 'conv_stem': _cs,
                     'n_layers': args.n_layers, 'patch': args.patch,
                     'element_length': args.element_length, 'max_len': args.max_len},
                    os.path.join(out_dir, f"{proto}_expert.pth"))

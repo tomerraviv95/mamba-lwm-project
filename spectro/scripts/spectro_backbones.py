@@ -25,6 +25,48 @@ _HF_LWM_PATH = os.path.join(_REPO_ROOT, 'spectro', 'hf_cache', 'pretraining', 'p
 
 ARCHS = ('mamba', 'transformer')
 
+
+class ConvStem(nn.Module):
+    """Per-patch conv+GELU stem replacing the bare ``Linear(element_length, d_model)`` tokenizer.
+
+    Measured motivation. Modulation order is a fine-scale amplitude statistic, and the arms' scores
+    track the granularity at which each model first applies a NONLINEARITY, not the number of tokens:
+
+        MobileNetV3-S   1.7 px (3x3 conv @ stride 1.14 on the 224-upsampled image)  -> 0.341
+        LWM patch 4     4 px, LINEAR, random init                                   -> 0.363
+        ResNet-18       4.0 px (7x7 conv)                                           -> 0.328
+        LWM patch 8     8 px, LINEAR                                                -> 0.302
+        raw patch 8     8 px, LINEAR                                                -> 0.242
+
+    Note the CV models have COARSER final grids than us (49 tokens vs 256/1024) -- their advantage
+    is that BN+ReLU follows their first conv at 1.7-4 px, while our first op is a linear map over a
+    whole 8x8 patch with no nonlinearity until after token mixing. This stem puts a 3x3 conv + GELU
+    inside each patch, so a nonlinear local statistic exists BEFORE aggregation, at ~3 px
+    granularity, without changing the token count or sequence length.
+
+    Applied PER PATCH rather than over the whole image on purpose: a full-image conv would pull
+    visible pixels across patch borders into masked patches during pretraining, leaking the
+    reconstruction target through the 3x3 kernel.
+    """
+
+    def __init__(self, element_length: int, d_model: int, patch: int, hidden: int = 16):
+        super().__init__()
+        self.patch = patch
+        self.in_ch = max(1, element_length // (patch * patch))
+        self.element_length = element_length
+        self.net = nn.Sequential(
+            nn.Conv2d(self.in_ch, hidden, 3, padding=1), nn.BatchNorm2d(hidden), nn.GELU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1), nn.BatchNorm2d(hidden), nn.GELU(),
+        )
+        self.proj = nn.Linear(hidden * patch * patch, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, t, e = x.shape
+        # tokens are row-major (row, col) within the patch, channels concatenated -> (B*T, C, p, p)
+        z = x.reshape(b * t, self.in_ch, self.patch, self.patch)
+        z = self.net(z).flatten(1)
+        return self.proj(z).reshape(b, t, -1)
+
 # Positional-embedding init std for the Transformer expert (see _patch_hf_embedding_second_order).
 _POS_EMBED_STD = float(os.environ.get('SPECTRO_POS_EMBED_STD', '0.02'))
 _hf_lwm_cls = None
@@ -124,7 +166,7 @@ class TransformerExpert(nn.Module):
     ``lwm_mamba_spectro``'s interface so the MoE/pretraining code is architecture-agnostic."""
 
     def __init__(self, element_length=16, d_model=128, n_layers=12, max_len=1025,
-                 n_heads=8, dropout=0.1, second_order_embed=False):
+                 n_heads=8, dropout=0.1, second_order_embed=False, conv_stem=False, patch=None):
         super().__init__()
         LWM = _load_hf_lwm()
         self.net = LWM(element_length=element_length, d_model=d_model, n_layers=n_layers,
@@ -134,6 +176,10 @@ class TransformerExpert(nn.Module):
             emb = self.net.embedding
             emb.second_order_embed = True
             emb.proj = nn.Linear(element_length * 2, d_model)
+        if conv_stem:
+            # swap the linear tokenizer for the per-patch conv stem; Embedding.forward calls
+            # self.proj(x), so a module taking (B,T,E) -> (B,T,d) drops straight in
+            self.net.embedding.proj = ConvStem(element_length, d_model, patch)
 
     def forward(self, input_ids, masked_pos=None):
         return self.net(input_ids, masked_pos)
@@ -173,7 +219,8 @@ def pool_tokens(output: 'torch.Tensor', pool: str = "mean") -> 'torch.Tensor':
 
 
 def build_expert(arch: str, *, d_model=128, n_layers=12, element_length=16, max_len=1025,
-                 n_heads=8, dropout=0.1, use_fast_path=True, second_order_embed=None):
+                 n_heads=8, dropout=0.1, use_fast_path=True, second_order_embed=None,
+                 conv_stem=None, patch=None):
     """Construct one per-protocol expert of the requested architecture.
 
     ``n_heads`` is used only by the Transformer; ``use_fast_path`` only by the Mamba (set False for
@@ -181,13 +228,27 @@ def build_expert(arch: str, *, d_model=128, n_layers=12, element_length=16, max_
     """
     if second_order_embed is None:
         second_order_embed = os.environ.get('SPECTRO_SO_EMBED', '1') not in ('0', 'false', 'False')
+    if conv_stem is None:
+        conv_stem = os.environ.get('SPECTRO_CONV_STEM', '0') not in ('0', 'false', 'False')
+    if conv_stem and patch is None:                       # infer the patch side from the geometry
+        for c in (1, 2):
+            side = int(round((element_length / c) ** 0.5))
+            if side * side * c == element_length:
+                patch = side
+                break
+    if conv_stem and second_order_embed:
+        # the stem already supplies a per-patch nonlinearity; [x, x^2] on top is redundant and
+        # would double the stem's input width for no measured benefit
+        second_order_embed = False
     if arch == 'mamba':
         return lwm_mamba_spectro(element_length=element_length, d_model=d_model,
                                  n_layers=n_layers, max_len=max_len, dropout=dropout,
                                  use_fast_path=use_fast_path,
-                                 second_order_embed=second_order_embed)
+                                 second_order_embed=second_order_embed,
+                                 conv_stem=conv_stem, patch=patch)
     if arch == 'transformer':
         return TransformerExpert(element_length=element_length, d_model=d_model,
                                  n_layers=n_layers, max_len=max_len, n_heads=n_heads,
-                                 dropout=dropout, second_order_embed=second_order_embed)
+                                 dropout=dropout, second_order_embed=second_order_embed,
+                                 conv_stem=conv_stem, patch=patch)
     raise ValueError(f"Unknown arch {arch!r}; expected one of {ARCHS}")
