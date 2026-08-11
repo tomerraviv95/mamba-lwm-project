@@ -396,7 +396,14 @@ def main():
         if args.max_per_expert and n_full > args.max_per_expert:     # RAM cap for big corpora on small hosts
             pick = np.random.RandomState(args.seed).permutation(n_full)[:args.max_per_expert]
             sel = sel[np.sort(pick)]
-        specs = pre.spectrograms[torch.as_tensor(sel)]
+        # Fancy-indexing COPIES. With --protocols the corpus is already filtered to this protocol,
+        # so `sel` selects every row and the copy is a full duplicate of the corpus -- 14.5 GB on
+        # the 1.33M corpus, i.e. a quarter of the job's memory for nothing. Take the tensor
+        # directly when the selection is the identity.
+        if len(sel) == pre.spectrograms.shape[0] and np.array_equal(sel, np.arange(len(sel))):
+            specs = pre.spectrograms
+        else:
+            specs = pre.spectrograms[torch.as_tensor(sel)]
         # modulation drives the in-training probe; mobility only feeds the (default-off) SupCon-mob head.
         # 'mobility' is no longer a top-level task (folded into the joint snr_doppler), so fall back to a
         # zero placeholder when absent — safe for the reconstruction-only default (w_cont=0).

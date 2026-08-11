@@ -2,7 +2,13 @@
 #SBATCH --job-name=lwm-study-pretrain
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=96G   # 1.33M-sample corpus: ~15 GB/protocol + masked tensors; 96G is headroom
+#SBATCH --mem=48G
+# Sized from the measured/derived peak for ONE protocol of the 1.33M corpus (--protocols splits the
+# job so only a third of the corpus is ever resident):
+#   specs 14.5 + ids 14.6 + toks 10.1 + pos 0.6 + ~2 torch/python = ~41.8 GB  -> 48G is ~87% used.
+# Patch-independent: element_length shrinks as the token count grows, so p4 and p8 cost the same.
+# (Was 96G, which over-requested by 2x and drew an HPC warning. A further ~25 GB could be saved by
+# building the masked tensors per batch instead of materializing ids/toks up front.)
 #SBATCH --time=24:00:00
 #SBATCH --array=0-19
 #SBATCH --output=cluster/logs/10_pretrain_%A_%a.out

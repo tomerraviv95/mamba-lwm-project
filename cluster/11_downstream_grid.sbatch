@@ -2,7 +2,10 @@
 #SBATCH --job-name=lwm-study-downstream
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=32G
+# Peak is the extracted feature tensor, which is largest at PATCH 4:
+#   eval spectrograms 2.6 + LWM features 78,109 x 1025 x 128 fp16 = 20.5 + ~2 = ~25 GB  -> 32G.
+# At patch 8 the features are 5.1 GB, so ~10 GB total. (Was 64G.)
 #SBATCH --time=12:00:00
 #SBATCH --array=0-9
 #SBATCH --output=cluster/logs/11_downstream_%A_%a.out
