@@ -21,6 +21,34 @@ echo "=== config ==="
 printf '  %-16s %s\n' REPR "${REPR:-sc}" PATCHES "$PATCHES" SEEDS "$STUDY_SEEDS" \
   SUFFIX "$STUDY_SUFFIX" VARIANT "$STUDY_VARIANT" W_CONT "$SPECTRO_W_CONT" STEPS "$SPECTRO_STEPS"
 
+echo "=== python entry points compile AND import ==="
+# compile(), not ast.parse(): "keyword argument repeated" and similar are raised at COMPILE time,
+# so ast.parse() happily accepts code that cannot run. That exact gap shipped a broken
+# spectro_train_heads.py to the cluster once -- every downstream arm died on import and the study
+# published header-only CSVs.
+$PY - <<'PY' || fail=1
+import importlib, os, sys, traceback
+sys.path.insert(0, os.path.join('spectro', 'scripts'))
+bad = False
+for d in ('spectro/scripts', 'spectro/datagen'):
+    for f in sorted(os.listdir(d)):
+        if not f.endswith('.py'):
+            continue
+        p = os.path.join(d, f)
+        try:
+            compile(open(p).read(), p, 'exec')
+        except SyntaxError as e:
+            print(f"  COMPILE FAIL {p}: {e}"); bad = True
+for m in ('spectro_train_heads', 'spectro_pretrain_real', 'spectro_backbones',
+          'spectro_moe', 'spectro_data', 'spectro_patchify', 'collate_csv'):
+    try:
+        importlib.import_module(m)
+    except Exception as e:
+        print(f"  IMPORT FAIL {m}: {type(e).__name__}: {e}"); bad = True
+print("  OK  all entry points compile and import" if not bad else "  BAD see above")
+sys.exit(1 if bad else 0)
+PY
+
 echo "=== datasets ==="
 for d in "$CORPUS_DIR" "$EVAL_INDIST_DIR" "$EVAL_XENV_DIR"; do
   $PY - "$d" <<'PY' || fail=1

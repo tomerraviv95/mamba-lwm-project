@@ -226,7 +226,7 @@ def _moe_features(data, device, routing, arch, patch, pool='mean', weights_suffi
 
     moe = SpectroMoE(PROTOCOLS, d_model=d_model, arch=arch, n_layers=n_layers, pool=pool, patch=patch,
                      element_length=element_length, max_len=max_len, in_channels=in_channels,
-                     second_order_embed=so_embed, conv_stem=conv_stem, patch=patch)
+                     second_order_embed=so_embed, conv_stem=conv_stem)
     for proto in PROTOCOLS:
         ckpt = torch.load(os.path.join(wdir, f'{proto}_expert.pth'),
                           map_location='cpu', weights_only=False)
