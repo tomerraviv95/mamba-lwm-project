@@ -119,5 +119,5 @@ def set_head_second_order(flag: bool) -> None:
 # Per-task training configuration for the frozen-feature probe (same schedule for every task).
 _BASE_CFG = {'epochs': 150, 'lr': 1e-3, 'batch_size': 128, 'patience': 25,
              'scheduler_step': 50, 'scheduler_gamma': 0.5, 'weight_decay': 1e-4}
-_TASK_NAMES = ('modulation', 'snr_doppler', 'protocol', 'snr', 'mobility')
+_TASK_NAMES = ('modulation', 'modulation3', 'snr_doppler', 'protocol', 'snr', 'mobility')
 TASK_CONFIGS = {t: dict(_BASE_CFG) for t in _TASK_NAMES}

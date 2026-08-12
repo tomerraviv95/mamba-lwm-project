@@ -31,7 +31,7 @@ ARM_LABELS = {
     'raw':                   'raw patches',
     'deepcnn':               'DeepCNN (end-to-end)',
 }
-PLOT_TASKS = ('modulation', 'snr_doppler')
+PLOT_TASKS = ('modulation', 'modulation3', 'snr_doppler')
 
 
 def _classify(dirname: str, patch: int, seed: int, variant: str = ''):

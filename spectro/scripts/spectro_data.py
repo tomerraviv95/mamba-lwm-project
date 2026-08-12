@@ -29,6 +29,16 @@ PROTOCOLS = ['LTE', 'WiFi', '5G']
 # is the protocol index resolved from `tech`.
 TASKS = {
     'modulation':  {'fields': ('mod',),        'name': 'Modulation'},
+    # 3-class modulation: BPSK / QPSK / QAM-family. MEASURED justification -- on this magnitude
+    # representation QAM16 vs 64 vs 256 is at CHANCE (macro-F1 0.330 against a 0.333 floor; 0.378
+    # even restricted to SNR>=15), because those orders differ only at statistical order 4 and the
+    # normalized C42 margins shrink ~4x per order (16->64: 0.061, 64->256: 0.0143). A log-power
+    # STFT is a windowed PSD estimator, so it cannot carry them. The same data and probe give 0.641
+    # all-SNR and 0.894 at SNR>=15 once those three are merged, versus 0.385 for the 5-class task
+    # -- i.e. roughly 40% of the 5-class score is an average over pairs that are indistinguishable
+    # by construction, which compresses every arm into a narrow band just above chance.
+    'modulation3': {'fields': ('mod',), 'name': 'Modulation (BPSK/QPSK/QAM)',
+                    'value_map': {'QAM16': 'QAM', 'QAM64': 'QAM', 'QAM256': 'QAM'}},
     'snr_doppler': {'fields': ('snr', 'mob'),  'name': 'SNR/Doppler'},
     'protocol':    {'fields': ('__protocol__',), 'name': 'Protocol'},
 }
@@ -57,10 +67,13 @@ def _build_labels(samples, protocol: np.ndarray, tasks: Dict = TASKS):
     labels, names = {}, {}
     for task, cfg in tasks.items():
         fields = cfg['fields']
+        vmap = cfg.get('value_map')           # optional class merging, e.g. QAM16/64/256 -> QAM
         raw = []
         for i in range(len(protocol)):
             parts = tuple(PROTOCOLS[protocol[i]] if f == '__protocol__' else _field_str(samples[i], f)
                           for f in fields)
+            if vmap:
+                parts = tuple(vmap.get(v, v) for v in parts)
             raw.append(parts)
         classes = sorted(set(raw),
                          key=lambda t: tuple(_class_sort_key(f, v) for f, v in zip(fields, t)))

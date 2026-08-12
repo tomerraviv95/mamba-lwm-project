@@ -21,8 +21,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-TASK_TITLES = {'modulation': 'Modulation Task', 'snr_doppler': 'SNR,Doppler Task'}
-TASK_ORDER = ['modulation', 'snr_doppler']
+TASK_TITLES = {
+    'modulation3': 'Modulation Task (BPSK/QPSK/QAM)','modulation': 'Modulation Task', 'snr_doppler': 'SNR,Doppler Task'}
+TASK_ORDER = ['modulation', 'modulation3', 'snr_doppler']
 # arm_label -> (color, linestyle, marker, linewidth); ordered for the legend
 STYLE = {
     'LWM Mamba (pretrained)':       ('#d62728', '-',  's', 2.4),
@@ -100,8 +101,12 @@ def main():
 
     for patch in patches:
         for ev in evals:
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
             tasks = [t for t in TASK_ORDER if any(k[:3] == (patch, ev, t) for k in A)]
+            # panel count follows the tasks actually present -- zip() against a hardcoded 2 would
+            # silently drop the third (modulation3) without any warning
+            fig, axes = plt.subplots(1, max(1, len(tasks)), figsize=(7 * max(1, len(tasks)), 5.5),
+                                     squeeze=False)
+            axes = axes[0]
             for ax, task in zip(axes, tasks):
                 for lab, (c, ls, mk, lw) in STYLE.items():
                     pts = sorted((k[4], *A[k]) for k in A if k[0] == patch and k[1] == ev
