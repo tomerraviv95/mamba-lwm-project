@@ -25,10 +25,12 @@
 # if a job gets OOM-killed.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-PY=.venv/bin/python
+# PY / CUDA_VISIBLE_DEVICES are overridable so cluster/05_datagen.sbatch can reuse this
+# recipe verbatim (uv-provided interpreter, GPU already bound by Slurm).
+PY="${PY:-.venv/bin/python}"
 OUT=spectro/outputs
 GEN="$PY spectro/datagen/generate_deepmimo_spectro.py --waveform sc --sc-channels 3 --vary-speed --batch 8 --bs-list 1 2 3"
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 echo "=== [1/3] pretraining corpus (85% users x 3 BS x 20 cities, 3 draws) ==="
 $GEN --all-users --draws 3 --user-split-frac 0.85 --user-split-part train \
