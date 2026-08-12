@@ -145,6 +145,8 @@ def sc_power_spectrogram(iq: torch.Tensor, n_fft: int = OUT_SIZE, win_length: in
 # (a density over n_bins bins averages to 1), which doubles as a sanity check on the estimator.
 SC_HIST_MEAN = 1.0000
 SC_HIST_STD = 1.3986
+SC_QTL_MEAN = 0.9244   # quantile channel: an amplitude, not a density -> its own scale
+SC_QTL_STD = 0.3926
 SC_BLKDB_MEAN = -1.98
 SC_BLKDB_STD = 5.10
 
@@ -163,7 +165,7 @@ def symbol_decimate(y: torch.Tensor, sps: int) -> torch.Tensor:
 
 
 def sc_amp_hist_channels(sym: torch.Tensor, n_blocks: int = OUT_SIZE, n_bins: int = OUT_SIZE,
-                         a_max: float = 3.0, norm: str = 'global',
+                         a_max: float = 3.0, norm: str = 'global', shape: str = 'hist',
                          hist_mean: float = SC_HIST_MEAN, hist_std: float = SC_HIST_STD,
                          blk_mean: float = SC_BLKDB_MEAN, blk_std: float = SC_BLKDB_STD,
                          eps: float = 1e-12) -> torch.Tensor:
@@ -196,13 +198,23 @@ def sc_amp_hist_channels(sym: torch.Tensor, n_blocks: int = OUT_SIZE, n_bins: in
     a = sym[:, :per * n_blocks].abs().reshape(n, n_blocks, per)
     p = a.pow(2).mean(2)                                        # (n, n_blocks) block mean power
     a_n = a / torch.sqrt(p + eps).unsqueeze(2)
-    idx = torch.clamp((a_n / a_max * n_bins).long(), 0, n_bins - 1)
-    h = torch.zeros(n, n_blocks, n_bins, device=sym.device, dtype=torch.float32)
-    h.scatter_add_(2, idx, torch.ones_like(a_n, dtype=torch.float32))
-    h = (h / per * n_bins).permute(0, 2, 1)                     # density -> (n, n_bins, n_blocks)
+    if shape == 'quantile':
+        # Empirical quantiles of the same distribution the histogram bins. Lower variance (no
+        # binning noise) and no a_max clipping, at the cost of a sort.
+        q = torch.sort(a_n, dim=2).values
+        sel = torch.linspace(0, per - 1, n_bins, device=sym.device).long()
+        h = q[:, :, sel].permute(0, 2, 1)                       # (n, n_bins, n_blocks)
+    elif shape == 'hist':
+        idx = torch.clamp((a_n / a_max * n_bins).long(), 0, n_bins - 1)
+        h = torch.zeros(n, n_blocks, n_bins, device=sym.device, dtype=torch.float32)
+        h.scatter_add_(2, idx, torch.ones_like(a_n, dtype=torch.float32))
+        h = (h / per * n_bins).permute(0, 2, 1)                 # density -> (n, n_bins, n_blocks)
+    else:
+        raise ValueError(f"shape must be hist|quantile, got {shape!r}")
     blk = (10.0 * torch.log10(p + eps)).unsqueeze(1).expand(-1, n_bins, -1)
     if norm == 'global':
-        h = (h - hist_mean) / hist_std
+        h = (h - (hist_mean if shape == 'hist' else SC_QTL_MEAN)) / \
+            (hist_std if shape == 'hist' else SC_QTL_STD)
         blk = (blk - blk_mean) / blk_std
     elif norm == 'sample':
         h = (h - h.mean((1, 2), keepdim=True)) / torch.clamp(h.std((1, 2), keepdim=True), min=1e-6)

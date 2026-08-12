@@ -43,7 +43,7 @@ def main():
     rng = np.random.RandomState(11)
     pdp = load_pdp(max(args.n, 64), rng)   # real ray-traced fading: block power stats depend on it
     n_pdp = pdp['delay'].shape[0]
-    h_sum = h_sq = b_sum = b_sq = 0.0
+    h_sum = h_sq = b_sum = b_sq = q_sum = q_sq = 0.0
     cnt = 0
     for tech in SC_CONFIGS:
         cfg = SC_CONFIGS[tech]
@@ -70,12 +70,15 @@ def main():
                 y = y + torch.sqrt(pw / snr_lin / 2) * torch.complex(torch.randn_like(y.real),
                                                                      torch.randn_like(y.real))
                 y = matched_filter(y, cfg.sps, cfg.rolloff, cfg.span_symbols)
-                ch = sc_amp_hist_channels(symbol_decimate(y, cfg.sps), norm='none').float()
+                sym = symbol_decimate(y, cfg.sps)
+                ch = sc_amp_hist_channels(sym, norm='none', shape='hist').float()
+                q = sc_amp_hist_channels(sym, norm='none', shape='quantile').float()[:, 0]
                 h, blk = ch[:, 0], ch[:, 1]
+                q_sum += q.sum().item(); q_sq += q.pow(2).sum().item()
                 h_sum += h.sum().item(); h_sq += h.pow(2).sum().item()
                 b_sum += blk.sum().item(); b_sq += blk.pow(2).sum().item()
                 cnt += h.numel()
-                del x, y, ch
+                del x, y, ch, q, sym
         print(f'  {tech} done ({cnt} elements)', flush=True)
 
     h_m = h_sum / cnt; h_s = (h_sq / cnt - h_m ** 2) ** 0.5
@@ -83,6 +86,9 @@ def main():
     print('\npaste into spectro/datagen/spectrogram.py:')
     print(f'SC_HIST_MEAN = {h_m:.4f}')
     print(f'SC_HIST_STD = {h_s:.4f}')
+    q_m = q_sum / cnt; q_s = (q_sq / cnt - q_m ** 2) ** 0.5
+    print(f'SC_QTL_MEAN = {q_m:.4f}')
+    print(f'SC_QTL_STD = {q_s:.4f}')
     print(f'SC_BLKDB_MEAN = {b_m:.2f}')
     print(f'SC_BLKDB_STD = {b_s:.2f}')
 

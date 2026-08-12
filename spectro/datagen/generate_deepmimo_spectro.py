@@ -151,7 +151,8 @@ def _generate_sc_group(tech, mod, idxs, args, rng, delays, powers, phases, aoas,
         if args.sc_channels == 3:
             # [log|STFT|^2 , symbol-amplitude histogram , block power dB] -- see sc_amp_hist_channels.
             sym = symbol_decimate(y, cfg.sps)
-            specs = torch.cat([specs, sc_amp_hist_channels(sym, norm=args.sc_norm)], dim=1)
+            specs = torch.cat([specs, sc_amp_hist_channels(sym, norm=args.sc_norm,
+                                                           shape=args.sc_amp_shape)], dim=1)
             del sym
         specs = specs.cpu()
         for j, i in enumerate(bi):
@@ -227,6 +228,10 @@ def main():
                          "'normalize with pretrained statistics'), which PRESERVES the dB variance "
                          "that carries modulation. 'sample' = legacy per-sample z-score, which "
                          "divides it out.")
+    ap.add_argument('--sc-amp-shape', choices=['hist', 'quantile'], default='quantile',
+                    help="channel-1 estimator of the per-block symbol-amplitude distribution. "
+                         "'quantile' = empirical quantiles (lower variance, no bin clipping); "
+                         "'hist' = binned density. Measured differences are small and mixed.")
     ap.add_argument('--sc-channels', type=int, choices=[1, 3], default=1,
                     help='1 = the paper representation, a single log-power STFT (1,128,128). '
                          '3 = that spectrogram PLUS two symbol-domain amplitude channels '
@@ -401,6 +406,7 @@ def main():
                 'channels': (args.sc_channels if args.waveform == 'sc' else
                              (2 if (args.complex or args.repr in ('grid_stft', 'grid_complex')) else 1)),
                 'sc_channels': args.sc_channels if args.waveform == 'sc' else None,
+                'sc_amp_shape': args.sc_amp_shape if args.sc_channels == 3 else None,
                 'sc_config': ({k: getattr(SC_CONFIGS['LTE'], k) for k in
                                ('sps', 'rolloff', 'span_symbols', 'num_symbols')}
                               if args.waveform == 'sc' else None),
