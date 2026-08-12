@@ -40,4 +40,19 @@ else
   echo "== [2/2] no CSVs under $STUDY_CSV_DIR/study_csv*/ — did 11_downstream_grid run? — skip =="
 fi
 
+# Refuse to publish header-only CSVs. hf_sync pushes whatever is on disk, so a failed study
+# silently overwrites good remote results with empty files that look valid.
+_bad=0
+for f in "$STUDY_CSV_DIR"/study_csv_"${STUDY_VARIANT:-$STUDY_HEAD}"/*.csv; do
+  [ -e "$f" ] || continue
+  _rows=$(( $(wc -l < "$f") - 1 ))
+  if [ "$_rows" -lt 1 ]; then echo "ERROR: $f has $_rows data rows — refusing to publish"; _bad=1
+  else echo "  ok $(basename "$f"): $_rows rows"; fi
+done
+if [ "$_bad" = 1 ]; then
+  echo "Nothing published. Check the downstream logs and submission dirs first:"
+  echo "  ls -d spectro/outputs/submissions/*${STUDY_VARIANT:-}* | wc -l"
+  exit 1
+fi
+
 echo "study publish done ($(date)). Plot locally: python spectro/scripts/plot_from_csv.py --hf-repo $HF_STUDY_REPO --variant ${STUDY_VARIANT:-$STUDY_HEAD}"

@@ -105,6 +105,18 @@ echo "----- collate CSV (variant=$H) p$PATCH s$SEED $(date) -----" | tee -a "$LO
 $PY spectro/scripts/collate_csv.py --patch "$PATCH" --seed "$SEED" --variant "$H" \
   --submissions "$REPO_ROOT/spectro/outputs/submissions" --out "$STUDY_CSV_DIR/study_csv_${H}" 2>&1 | tee -a "$LOG"
 
+# An empty CSV means collate found no submission dirs -- i.e. every arm failed, or the run-tag
+# namespace does not match what collate expects. Publishing that produces a header-only file that
+# looks like a successful study, which has already cost a full debugging cycle. Fail here instead.
+CSV_OUT="$STUDY_CSV_DIR/study_csv_${H}/results_p${PATCH}_s${SEED}.csv"
+CSV_ROWS=$(( $(wc -l < "$CSV_OUT" 2>/dev/null || echo 1) - 1 ))
+if [ "$CSV_ROWS" -lt 1 ]; then
+  echo "=== 11 FAILED idx=$IDX (p$PATCH s$SEED): collate wrote $CSV_ROWS data rows to $CSV_OUT ===" | tee -a "$LOG"
+  echo "    submission dirs matching *${H}*: $(ls -d "$REPO_ROOT"/spectro/outputs/submissions/*"${H}"* 2>/dev/null | wc -l)" | tee -a "$LOG"
+  exit 1
+fi
+echo "--- collate OK: $CSV_ROWS data rows -> $CSV_OUT" | tee -a "$LOG"
+
 if [ -n "$FAILED_ARMS" ]; then
   echo "=== 11 FAILED idx=$IDX (p$PATCH s$SEED): arms ->$FAILED_ARMS ===" | tee -a "$LOG"
   exit 1
