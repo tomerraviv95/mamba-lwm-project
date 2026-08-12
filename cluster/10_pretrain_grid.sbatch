@@ -12,6 +12,13 @@
 #SBATCH --time=24:00:00
 #SBATCH --array=0-19
 #SBATCH --output=cluster/logs/10_pretrain_%A_%a.out
+# NOTE on --output: this is a RELATIVE path, which Slurm resolves against the job's working
+# directory, NOT against the submit directory. Sites with a job_submit plugin (this one prints
+# "GPU Parameter Set ! Using GPU Partition.") can change that workdir. When the resolved directory
+# does not exist, Slurm fails the job BEFORE the script runs: 00:00:00 elapsed, ExitCode 0:53, and
+# no log at all -- the job simply "disappears", and nothing in the script can report it because the
+# log is exactly what could not be created. Submit via cluster/run_study.sh, which passes an
+# ABSOLUTE --chdir and --output and overrides this default.
 # COMPUTE-NODE step (STUDY): pretrain ONE (arch, patch, seed) per array task, reconstruction-only.
 # The grid is (arch in {mamba,transformer}) x (patch in PATCHES) x (seed in STUDY_SEEDS) = 2*2*5 = 20 tasks
 # by default -> --array=0-19. If you change PATCHES / STUDY_SEEDS, update the --array range to match

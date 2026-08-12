@@ -39,6 +39,11 @@ if ! touch cluster/logs/_submit_writetest 2>/dev/null; then
   exit 1
 fi
 rm -f cluster/logs/_submit_writetest
+# Absolute paths for BOTH the workdir and the log file. The sbatch defaults are relative, and a
+# site plugin that rewrites the working directory then makes Slurm kill the job at 00:00:00 with no
+# log. Passing these on the command line overrides the in-script #SBATCH defaults.
+LOGDIR="$(cd cluster/logs && pwd)"
+SBATCH_COMMON=(--export=ALL --chdir="$REPO_ROOT")
 _avail=$(df -Pk . | awk 'NR==2{print $4}')
 if [ "${_avail:-0}" -lt 5242880 ]; then          # < 5 GB free
   echo "WARNING: only $((_avail/1024/1024)) GB free here. Jobs die at 00:00:00 with no log when the"
@@ -46,9 +51,9 @@ if [ "${_avail:-0}" -lt 5242880 ]; then          # < 5 GB free
   echo "         hf_download_sc.py writes straight to the target and does not need it."
 fi
 
-JID_PRE=$(sbatch --parsable --export=ALL --array=0-$((N_PRE-1)) cluster/10_pretrain_grid.sbatch)
+JID_PRE=$(sbatch --parsable "${SBATCH_COMMON[@]}" --array=0-$((N_PRE-1)) --output="$LOGDIR/10_pretrain_%A_%a.out" cluster/10_pretrain_grid.sbatch)
 echo "submitted 10_pretrain_grid  -> job $JID_PRE"
-JID_DOWN=$(sbatch --parsable --export=ALL --array=0-$((N_DOWN-1)) --dependency=afterany:"$JID_PRE" cluster/11_downstream_grid.sbatch)
+JID_DOWN=$(sbatch --parsable "${SBATCH_COMMON[@]}" --array=0-$((N_DOWN-1)) --output="$LOGDIR/11_downstream_%A_%a.out" --dependency=afterany:"$JID_PRE" cluster/11_downstream_grid.sbatch)
 echo "submitted 11_downstream_grid -> job $JID_DOWN (starts after $JID_PRE completes OK)"
 
 cat <<EOF

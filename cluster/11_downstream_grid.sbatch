@@ -9,6 +9,13 @@
 #SBATCH --time=12:00:00
 #SBATCH --array=0-9
 #SBATCH --output=cluster/logs/11_downstream_%A_%a.out
+# NOTE on --output: this is a RELATIVE path, which Slurm resolves against the job's working
+# directory, NOT against the submit directory. Sites with a job_submit plugin (this one prints
+# "GPU Parameter Set ! Using GPU Partition.") can change that workdir. When the resolved directory
+# does not exist, Slurm fails the job BEFORE the script runs: 00:00:00 elapsed, ExitCode 0:53, and
+# no log at all -- the job simply "disappears", and nothing in the script can report it because the
+# log is exactly what could not be created. Submit via cluster/run_study.sh, which passes an
+# ABSOLUTE --chdir and --output and overrides this default.
 # COMPUTE-NODE step (STUDY): for ONE (patch, seed) per array task, evaluate every arm on BOTH eval sets
 # (seen=in-dist, unseen=held-out cities), then collate a single tidy CSV. Grid = (patch in PATCHES) x
 # (seed in STUDY_SEEDS) = 2*5 = 10 tasks -> --array=0-9 (update if you change PATCHES / STUDY_SEEDS).
