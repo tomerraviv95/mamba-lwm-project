@@ -18,8 +18,24 @@ source cluster/config.env
 cd "$REPO_ROOT"
 PY="${PY:-uv run --no-sync python}"
 
+# DeepMIMO is recorded in this repo as a GITLINK (mode 160000) with no .gitmodules, so a fresh
+# clone/pull leaves an EMPTY DeepMIMO/ directory and `import deepmimo` fails with nothing obviously
+# wrong in the tree. Restore it at the pinned commit rather than tracking upstream HEAD, so the
+# generated corpus stays reproducible.
+DEEPMIMO_COMMIT=f640e86e66ab0b83129eefcb9078c539119438ad
+if [ ! -f "$REPO_ROOT/DeepMIMO/pyproject.toml" ]; then
+  echo "=== DeepMIMO source missing (empty gitlink) -> cloning at $DEEPMIMO_COMMIT ==="
+  rm -rf "$REPO_ROOT/DeepMIMO"
+  git clone -q https://github.com/DeepMIMO/DeepMIMO.git "$REPO_ROOT/DeepMIMO" || {
+    echo "FAILED to clone DeepMIMO (login node has internet; compute nodes may not)"; exit 1; }
+  git -C "$REPO_ROOT/DeepMIMO" checkout -q "$DEEPMIMO_COMMIT" || exit 1
+  echo "  cloned -> installing editable"
+  uv pip install -q -e "$REPO_ROOT/DeepMIMO" || { echo "FAILED to install DeepMIMO"; exit 1; }
+fi
+
 echo "=== datagen dependencies ==="
-$PY - <<'PY' || { echo "FAILED: install datagen deps (pip install -r requirements.txt; pip install -e ./DeepMIMO)"; exit 1; }
+# NOTE: the `|| {...}` must stay on ONE line -- anything after it is heredoc body, not shell.
+$PY - <<'PY' || { printf '%s\n' "FAILED: install the missing datagen deps, e.g." "    uv pip install 'sionna>=2.0'" "    uv pip install -e ./DeepMIMO"; exit 1; }
 import importlib, sys
 bad = []
 for m in ('deepmimo', 'sionna', 'torch'):
