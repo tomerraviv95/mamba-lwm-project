@@ -39,7 +39,7 @@ from sionna.phy.ofdm import OFDMDemodulator  # noqa: E402
 from sionna_blocks import DEVICE, _BINARY_SOURCE, _ofdm_chain  # noqa: E402
 from spectrogram import (iq_batch_to_spectrogram, iq_batch_to_complex_spectrogram,  # noqa: E402
                          grid_mag_to_spectrogram, grid_complex_to_spectrogram,
-                         sc_power_spectrogram)
+                         sc_power_spectrogram, sc_amp_hist_channels, symbol_decimate)
 
 _REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 _DEFAULT_OUT = os.path.join(_REPO_ROOT, 'spectro', 'outputs', 'spectro_deepmimo')
@@ -147,7 +147,13 @@ def _generate_sc_group(tech, mod, idxs, args, rng, delays, powers, phases, aoas,
         y = y + torch.sqrt(no / 2) * torch.complex(torch.randn_like(y.real), torch.randn_like(y.real))
         y = matched_filter(y, cfg.sps, cfg.rolloff, cfg.span_symbols)
         specs = sc_power_spectrogram(y, n_fft=128, win_length=args.sc_win, out_size=128,
-                                     norm=args.sc_norm).cpu()
+                                     norm=args.sc_norm)
+        if args.sc_channels == 3:
+            # [log|STFT|^2 , symbol-amplitude histogram , block power dB] -- see sc_amp_hist_channels.
+            sym = symbol_decimate(y, cfg.sps)
+            specs = torch.cat([specs, sc_amp_hist_channels(sym, norm=args.sc_norm)], dim=1)
+            del sym
+        specs = specs.cpu()
         for j, i in enumerate(bi):
             buffer.append({'tech': tech, 'snr': snr_label(snr_labels[i]), 'mod': mod,
                            'mob': mobs[i], 'city': used_cities[city[i]],
@@ -221,6 +227,15 @@ def main():
                          "'normalize with pretrained statistics'), which PRESERVES the dB variance "
                          "that carries modulation. 'sample' = legacy per-sample z-score, which "
                          "divides it out.")
+    ap.add_argument('--sc-channels', type=int, choices=[1, 3], default=1,
+                    help='1 = the paper representation, a single log-power STFT (1,128,128). '
+                         '3 = that spectrogram PLUS two symbol-domain amplitude channels '
+                         '[amplitude histogram, block power dB] (3,128,128). The STFT observes only '
+                         'a few hundred of the burst\'s 131072 symbols and reports pooled power, so '
+                         'it averages away the amplitude distribution that separates QAM orders: '
+                         'measured on identical waveforms, QAM16/64/256 reads 0.332 macro-F1 (chance '
+                         '0.333) on 1 channel and 0.572 on 3, and mobility 0.535 -> 0.727. Costs 3x '
+                         'the shard bytes and 3x element_length.\n')
     ap.add_argument('--no-freq-jitter', action='store_true',
                     help='disable the random in-band frequency offset. Leave it ON: without it the '
                          'occupied band sits at fixed bins and 7-way SNR collapses to a guard-band '
@@ -383,8 +398,9 @@ def main():
                 'sc_win': args.sc_win if args.waveform == 'sc' else None,
                 'sc_norm': args.sc_norm if args.waveform == 'sc' else None,
                 'freq_jitter': (not args.no_freq_jitter) if args.waveform == 'sc' else None,
-                'channels': 2 if (args.complex or args.repr in ('grid_stft', 'grid_complex'))
-                            and args.waveform == 'ofdm' else 1,
+                'channels': (args.sc_channels if args.waveform == 'sc' else
+                             (2 if (args.complex or args.repr in ('grid_stft', 'grid_complex')) else 1)),
+                'sc_channels': args.sc_channels if args.waveform == 'sc' else None,
                 'sc_config': ({k: getattr(SC_CONFIGS['LTE'], k) for k in
                                ('sps', 'rolloff', 'span_symbols', 'num_symbols')}
                               if args.waveform == 'sc' else None),

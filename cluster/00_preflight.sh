@@ -13,12 +13,13 @@ ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
 # shellcheck disable=SC1091
 source cluster/config.env
+export SC_CHANNELS="${SC_CHANNELS:-1}"
 cd "$REPO_ROOT"
 PY="${PY:-uv run --no-sync python}"
 fail=0
 
 echo "=== config ==="
-printf '  %-16s %s\n' REPR "${REPR:-sc}" PATCHES "$PATCHES" SEEDS "$STUDY_SEEDS" \
+printf '  %-16s %s\n' REPR "${REPR:-sc}" SC_CHANNELS "${SC_CHANNELS:-1}" PATCHES "$PATCHES" SEEDS "$STUDY_SEEDS" \
   SUFFIX "$STUDY_SUFFIX" VARIANT "$STUDY_VARIANT" W_CONT "$SPECTRO_W_CONT" STEPS "$SPECTRO_STEPS"
 
 echo "=== python entry points compile AND import ==="
@@ -66,8 +67,13 @@ print(f"  {'OK ' if ok else 'BAD'} {os.path.basename(d):34s} n={man.get('n_sampl
       f"shards={present}/{n_sh} waveform={man.get('waveform')} sc_norm={man.get('sc_norm')} "
       f"draws={man.get('draws')} split={man.get('user_split_part')}")
 # a repr mismatch between pretrain and eval is UNDETECTABLE downstream (same shapes) -> assert here
+want_ch = int(os.environ.get('SC_CHANNELS', '1'))
 if man.get('waveform') != 'sc' or man.get('sc_norm') != 'global':
     print(f"     ^ expected waveform=sc sc_norm=global"); sys.exit(1)
+if int(man.get('channels') or 1) != want_ch:
+    print(f"     ^ channels={man.get('channels')} but SC_CHANNELS={want_ch} -- a channel-count "
+          f"mismatch changes element_length and silently produces an unloadable/wrong-shaped run")
+    sys.exit(1)
 sys.exit(0 if ok else 1)
 PY
 done
@@ -76,7 +82,7 @@ echo "=== corpus/eval consistency ==="
 $PY - "$CORPUS_DIR" "$EVAL_INDIST_DIR" "$EVAL_XENV_DIR" <<'PY' || fail=1
 import json, os, sys
 ms = [json.load(open(os.path.join(d, 'manifest.json'))) for d in sys.argv[1:]]
-keys = ('waveform', 'sc_win', 'sc_norm', 'channels')
+keys = ('waveform', 'sc_win', 'sc_norm', 'channels')   # channels: 1 vs 3 must not be mixed
 base = {k: ms[0].get(k) for k in keys}
 bad = False
 for d, m in zip(sys.argv[1:], ms):

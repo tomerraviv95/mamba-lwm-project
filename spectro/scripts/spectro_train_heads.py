@@ -84,11 +84,26 @@ class ResNet18FT(nn.Module):
     def forward(self, x):
         if x.dim() == 3:
             x = x.unsqueeze(1)
-        if x.shape[1] == 2:
-            x = torch.stack([x[:, 0], x[:, 1], x.mean(1)], dim=1)
-        elif x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)
+        x = _to_3ch(x)
         return self.net(x)
+
+
+def _to_3ch(x: torch.Tensor) -> torch.Tensor:
+    """(N,C,H,W) -> (N,3,H,W) for an ImageNet backbone, for every corpus channel count we generate.
+
+    1 -> replicate; 2 -> [ch0, ch1, mean] (complex/dual corpora); 3 -> passthrough, which is the
+    natural case for the sc-channels-3 corpus [STFT, amplitude histogram, block power dB]. Anything
+    else is a corpus we do not have a defensible mapping for, so fail loudly rather than silently
+    feeding the baseline a different view than the LWM arms get.
+    """
+    c = x.shape[1]
+    if c == 3:
+        return x
+    if c == 1:
+        return x.repeat(1, 3, 1, 1)
+    if c == 2:
+        return torch.stack([x[:, 0], x[:, 1], x.mean(1)], dim=1)
+    raise ValueError(f"no 3-channel mapping for a {c}-channel corpus")
 
 
 def _random_project(features: torch.Tensor, out_dim: int, seed: int = 0) -> torch.Tensor:
@@ -163,10 +178,7 @@ def _imagenet_features(data, model_name, device, batch=64, as_sequence=False) ->
     with torch.no_grad():
         for s in range(0, specs.shape[0], batch):
             x = specs[s:s + batch].to(device)                       # (b,C,128,128), C in {1,2}
-            if x.shape[1] == 2:
-                x = torch.stack([x[:, 0], x[:, 1], x.mean(1)], dim=1)      # 3ch [stft, grid, mean]
-            elif x.shape[1] == 1:
-                x = x.repeat(1, 3, 1, 1)
+            x = _to_3ch(x)
             x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
             y = extractor(x)
             if as_sequence:

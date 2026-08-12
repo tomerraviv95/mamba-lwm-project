@@ -135,6 +135,83 @@ def sc_power_spectrogram(iq: torch.Tensor, n_fft: int = OUT_SIZE, win_length: in
     return p_db.to(torch.float16)                       # (n, 1, out, out)
 
 
+# --- symbol-domain amplitude channels -------------------------------------------------------
+# Corpus-level normalization constants for the two amplitude-histogram channels, calibrated the same
+# way as SC_DB_MEAN/STD (see calibrate_sc3_norm.py). Filled by calibration; both are per-CHANNEL,
+# because the histogram channel (a density in [0, nbins]) and the block-power channel (dB) live on
+# completely different scales and a joint z-score would flatten one of them.
+# Measured over all 3 protocols x 5 mods x 7 SNRs x 3 mobilities through DeepMIMO channels
+# (calibrate_sc3_norm.py --n 450, 14.7M elements). The histogram mean is exactly 1.0 by construction
+# (a density over n_bins bins averages to 1), which doubles as a sanity check on the estimator.
+SC_HIST_MEAN = 1.0000
+SC_HIST_STD = 1.3986
+SC_BLKDB_MEAN = -1.98
+SC_BLKDB_STD = 5.10
+
+
+def symbol_decimate(y: torch.Tensor, sps: int) -> torch.Tensor:
+    """(n, T) matched-filtered baseband -> (n, T//sps) at the max-energy symbol phase, per sample.
+
+    The matched filter peaks once per symbol; which of the ``sps`` offsets is the peak depends on the
+    channel's delay, so the phase is chosen per sample by maximising decimated energy. This is a
+    timing recovery stand-in, not a full one — good enough that the decimated amplitudes concentrate
+    on the constellation rings, which is all the histogram needs.
+    """
+    cand = torch.stack([y[:, o::sps].abs().pow(2).mean(1) for o in range(sps)], dim=1)  # (n, sps)
+    off = cand.argmax(1)
+    return torch.stack([y[b, int(off[b])::sps] for b in range(y.shape[0])])
+
+
+def sc_amp_hist_channels(sym: torch.Tensor, n_blocks: int = OUT_SIZE, n_bins: int = OUT_SIZE,
+                         a_max: float = 3.0, norm: str = 'global',
+                         hist_mean: float = SC_HIST_MEAN, hist_std: float = SC_HIST_STD,
+                         blk_mean: float = SC_BLKDB_MEAN, blk_std: float = SC_BLKDB_STD,
+                         eps: float = 1e-12) -> torch.Tensor:
+    """Symbol amplitudes -> ``(n, 2, n_bins, n_blocks)``: [amplitude histogram, block power in dB].
+
+    Why this exists. The 128x128 STFT observes ``n_fft`` samples per frame x 128 frames, i.e. a few
+    hundred of the burst's 131072 symbols, and each frame reports a *pooled* power. The statistic
+    that separates QAM orders is the shape of the amplitude distribution over MANY symbols, so the
+    STFT averages it away before the model sees it: measured, QAM16-vs-64-vs-256 reads 0.332 macro-F1
+    on the magnitude spectrogram against a 0.333 chance floor, and 0.572 here — from the *same*
+    waveforms. The information was always present; the representation discarded it.
+
+    Channel 0 is the per-block histogram of ``|s| / rms(block)``. Dividing by the block RMS makes it
+    invariant to amplitude scale, so it encodes constellation SHAPE and not received power or SNR —
+    and the per-block (rather than per-burst) normalization also divides out slow fading, which would
+    otherwise smear the rings.
+
+    Channel 1 restores what channel 0 deliberately threw away: ``10*log10`` of each block's mean
+    power, broadcast across the bin axis. Its level carries SNR and its fluctuation across blocks
+    carries Doppler — at symbol-rate resolution over the whole burst, which is a far longer slow-time
+    window than the STFT's 128 frames. Measured, mobility reads 0.727 here vs 0.535 on the STFT.
+
+    Both axes are ``out_size`` so the result concatenates onto the ``(n,1,128,128)`` spectrogram along
+    the channel axis with no resize.
+    """
+    n, total = sym.shape
+    per = total // n_blocks
+    if per < 1:
+        raise ValueError(f"burst of {total} symbols is too short for {n_blocks} blocks")
+    a = sym[:, :per * n_blocks].abs().reshape(n, n_blocks, per)
+    p = a.pow(2).mean(2)                                        # (n, n_blocks) block mean power
+    a_n = a / torch.sqrt(p + eps).unsqueeze(2)
+    idx = torch.clamp((a_n / a_max * n_bins).long(), 0, n_bins - 1)
+    h = torch.zeros(n, n_blocks, n_bins, device=sym.device, dtype=torch.float32)
+    h.scatter_add_(2, idx, torch.ones_like(a_n, dtype=torch.float32))
+    h = (h / per * n_bins).permute(0, 2, 1)                     # density -> (n, n_bins, n_blocks)
+    blk = (10.0 * torch.log10(p + eps)).unsqueeze(1).expand(-1, n_bins, -1)
+    if norm == 'global':
+        h = (h - hist_mean) / hist_std
+        blk = (blk - blk_mean) / blk_std
+    elif norm == 'sample':
+        h = (h - h.mean((1, 2), keepdim=True)) / torch.clamp(h.std((1, 2), keepdim=True), min=1e-6)
+        blk = (blk - blk.mean((1, 2), keepdim=True)) / torch.clamp(blk.std((1, 2), keepdim=True), min=1e-6)
+    elif norm != 'none':
+        raise ValueError(f"norm must be one of global|sample|none, got {norm!r}")
+    return torch.stack([h, blk], dim=1).to(torch.float16)       # (n, 2, n_bins, n_blocks)
+
+
 def grid_mag_to_spectrogram(grid_mag: torch.Tensor, out_size: int = OUT_SIZE,
                             normalize: bool = True) -> torch.Tensor:
     """Received resource-grid magnitude -> (n,1,out,out) float16 dB z-scored spectrogram.
