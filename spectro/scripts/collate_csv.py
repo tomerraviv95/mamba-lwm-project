@@ -18,7 +18,7 @@ Usage:
         --submissions spectro/outputs/submissions --out spectro/outputs/results_csv/study_csv
 """
 from __future__ import annotations
-import argparse, csv, glob, json, os, re
+import argparse, csv, glob, json, os, re, sys, time
 
 # canonical arm key -> display label used by the plotter
 ARM_LABELS = {
@@ -72,9 +72,15 @@ def main():
     ap.add_argument('--submissions', default='spectro/outputs/submissions')
     ap.add_argument('--out', default='spectro/outputs/results_csv/study_csv',
                     help='output directory; writes results_p{patch}_s{seed}.csv there')
+    ap.add_argument('--newer-than', type=float, default=0.0, metavar='EPOCH',
+                    help='reject aggregated_results.json older than this unix time. A submission dir '
+                         'is NOT cleared between runs, so an arm that dies before writing leaves the '
+                         'PREVIOUS run\'s json in place and this script silently collates it as if '
+                         'it were current. That shipped stale mamba rows into a published study.')
     args = ap.parse_args()
 
     rows = []
+    stale, arm_tasks = [], {}
     for path in sorted(glob.glob(os.path.join(args.submissions, 'submission_spectro_*'))):
         if not os.path.isdir(path):
             continue
@@ -86,8 +92,14 @@ def main():
         if not os.path.isfile(jf):
             print(f"  WARN no aggregated_results.json in {os.path.basename(path)}")
             continue
+        if args.newer_than and os.path.getmtime(jf) < args.newer_than:
+            age = (args.newer_than - os.path.getmtime(jf)) / 3600.0
+            stale.append(f"{os.path.basename(path)} ({age:.1f}h older than this run)")
+            continue
         with open(jf) as f:
             js = json.load(f)
+        arm_tasks[(arm_key, ev)] = sorted(
+            t for t in PLOT_TASKS if js.get('results_by_task', {}).get(f'task_{t}'))
         for task in PLOT_TASKS:
             tr = js.get('results_by_task', {}).get(f'task_{task}')
             if not tr:
@@ -109,8 +121,25 @@ def main():
         w.writeheader(); w.writerows(rows)
     arms = sorted({r['arm'] for r in rows}); evals = sorted({r['eval'] for r in rows})
     print(f"wrote {len(rows)} rows -> {out_csv}  (arms={arms}, evals={evals})")
-    if len(arms) < 7:
-        print(f"  NOTE: expected 7 arms, found {len(arms)} — some arm runs may be missing for p{args.patch} s{args.seed}")
+    bad = False
+    for d in stale:
+        print(f"  STALE (skipped): {d}"); bad = True
+    # Arms disagreeing on which tasks they carry is the signature of a partially-updated run: the
+    # task list changed (e.g. modulation3 was added) and only some arms were re-run. Averaging or
+    # plotting across that silently compares different recipes, so refuse it.
+    sets = {tuple(v) for v in arm_tasks.values()}
+    if len(sets) > 1:
+        print("  INCONSISTENT task sets across arms -- this run mixes results from different recipes:")
+        for (a, e), t in sorted(arm_tasks.items()):
+            print(f"    {a:24s} {e:6s} {list(t)}")
+        bad = True
+    missing = [(a, e) for a in ARM_LABELS for e in ('seen', 'unseen') if (a, e) not in arm_tasks]
+    if missing:
+        print(f"  MISSING {len(missing)} (arm, eval) cells: {missing}")
+        bad = True
+    if bad:
+        print("  -> collate refuses to certify this CSV; the sbatch will fail the task.")
+        sys.exit(2)
 
 
 if __name__ == '__main__':

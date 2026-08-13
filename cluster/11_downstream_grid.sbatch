@@ -2,10 +2,14 @@
 #SBATCH --job-name=lwm-study-downstream
 #SBATCH --gpus=rtx_3090:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=56G
 # Peak is the extracted feature tensor, which is largest at PATCH 4:
 #   eval spectrograms 2.6 + LWM features 78,109 x 1025 x 128 fp16 = 20.5 + ~2 = ~25 GB  -> 32G.
-# At patch 8 the features are 5.1 GB, so ~10 GB total. (Was 64G.)
+# At patch 8 the features are 5.1 GB, so ~10 GB total.
+# Raised 32G -> 56G because the SEEN eval (EVAL_INDIST_DIR, 15% of all users x 3 BS) is larger than
+# the held-out set the 32G estimate was derived from, and the transformer arms were OOM-KILLED on it
+# (rc=137) at p4 while the same arms passed on unseen. 56G stays under the 60 GB HPC ceiling.
+# At --sc-channels 3 the eval spectrograms are 3x (2.6 -> 7.8 GB), which this also covers.
 #SBATCH --time=12:00:00
 #SBATCH --array=0-9
 #SBATCH --output=cluster/logs/11_downstream_%A_%a.out
@@ -59,6 +63,7 @@ done
 
 # spectro_train_heads.py wrapper: frozen backbone + trainable head (or e2e for deepcnn).
 FAILED_ARMS=""
+RUN_START=$(date +%s)   # collate rejects any aggregated_results.json older than this
 run_arm() {  # arm run_tag restarts [extra flags...]
   local arm="$1" tag="$2" restarts="$3"; shift 3
   $PY spectro/scripts/spectro_train_heads.py --arm "$arm" --patch "$PATCH" \
@@ -102,8 +107,13 @@ for EV in seen unseen; do
 done
 
 echo "----- collate CSV (variant=$H) p$PATCH s$SEED $(date) -----" | tee -a "$LOG"
+# --newer-than $RUN_START: a submission dir is not cleared between runs, so an arm that dies before
+# writing leaves the PREVIOUS run's aggregated_results.json in place. Collating that silently
+# republished stale mamba numbers as if they were current. Anything older than this job is refused.
 $PY spectro/scripts/collate_csv.py --patch "$PATCH" --seed "$SEED" --variant "$H" \
+  --newer-than "$RUN_START" \
   --submissions "$REPO_ROOT/spectro/outputs/submissions" --out "$STUDY_CSV_DIR/study_csv_${H}" 2>&1 | tee -a "$LOG"
+COLLATE_RC=${PIPESTATUS[0]}
 
 # An empty CSV means collate found no submission dirs -- i.e. every arm failed, or the run-tag
 # namespace does not match what collate expects. Publishing that produces a header-only file that
@@ -113,6 +123,10 @@ CSV_ROWS=$(( $(wc -l < "$CSV_OUT" 2>/dev/null || echo 1) - 1 ))
 if [ "$CSV_ROWS" -lt 1 ]; then
   echo "=== 11 FAILED idx=$IDX (p$PATCH s$SEED): collate wrote $CSV_ROWS data rows to $CSV_OUT ===" | tee -a "$LOG"
   echo "    submission dirs matching *${H}*: $(ls -d "$REPO_ROOT"/spectro/outputs/submissions/*"${H}"* 2>/dev/null | wc -l)" | tee -a "$LOG"
+  exit 1
+fi
+if [ "$COLLATE_RC" -ne 0 ]; then
+  echo "=== 11 FAILED idx=$IDX (p$PATCH s$SEED): collate rejected the CSV (rc=$COLLATE_RC) — see STALE/INCONSISTENT/MISSING above ===" | tee -a "$LOG"
   exit 1
 fi
 echo "--- collate OK: $CSV_ROWS data rows -> $CSV_OUT" | tee -a "$LOG"
